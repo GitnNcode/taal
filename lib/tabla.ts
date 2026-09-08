@@ -225,3 +225,190 @@ export class TablaAudio {
     if (this.context) void this.context.close();
   }
 }
+
+// Composition timing uses quarter-beat units so fractional durations remain exact.
+export type CompositionStep = {
+  id: string;
+  bol: Bol | 'Rest' | null;
+  units: number;
+  emphasis: number;
+};
+export type Composition = {
+  version: 1;
+  name: string;
+  beatsPerCycle: number;
+  steps: CompositionStep[];
+};
+export const compositionUnits = (steps: CompositionStep[]) =>
+  steps.reduce((sum, step) => sum + step.units, 0);
+export function compositionStep(
+  bol: CompositionStep['bol'] = null,
+  units = 4,
+): CompositionStep {
+  return { id: crypto.randomUUID(), bol, units, emphasis: 0.8 };
+}
+export function fitComposition(
+  steps: CompositionStep[],
+  beats: number,
+  minimumUnits = beats * 4,
+): CompositionStep[] {
+  if (!Number.isInteger(beats) || beats < 1 || beats > 64)
+    throw new Error('Choose 1–64 beats per cycle.');
+  const result = steps.map((step) => ({ ...step }));
+  while (result.length && result.at(-1)!.bol === null) result.pop();
+  let used = compositionUnits(result);
+  const capacity = Math.max(
+    beats * 4,
+    Math.ceil(Math.max(used, minimumUnits) / (beats * 4)) * beats * 4,
+  );
+  if (capacity > 16384)
+    throw new Error(
+      'This composition is full (4,096 beats). Export it and start another.',
+    );
+  while (used < capacity) {
+    const units = Math.min(4 - (used % 4), capacity - used);
+    result.push(compositionStep(null, units));
+    used += units;
+  }
+  return result;
+}
+export function newComposition(): Composition {
+  return {
+    version: 1,
+    name: 'My composition',
+    beatsPerCycle: 16,
+    steps: fitComposition([], 16),
+  };
+}
+export function placeCompositionStep(
+  composition: Composition,
+  targetId: string,
+  source: { id: string } | { bol: CompositionStep['bol'] },
+): Composition {
+  if ('id' in source && source.id === targetId) return composition;
+  let steps = composition.steps.map((step) => ({ ...step }));
+  const step =
+    'id' in source
+      ? steps.find((step) => step.id === source.id)
+      : compositionStep(source.bol);
+  if (!step || !steps.some((step) => step.id === targetId)) return composition;
+  if ('id' in source) steps = steps.filter((step) => step.id !== source.id);
+  const target = steps.findIndex((step) => step.id === targetId);
+  if (target < 0) return composition;
+  if (steps[target].bol === null) {
+    const remaining = steps[target].units - step.units;
+    steps.splice(
+      target,
+      1,
+      step,
+      ...(remaining > 0 ? [compositionStep(null, remaining)] : []),
+    );
+  } else steps.splice(target, 0, step);
+  return {
+    ...composition,
+    steps: fitComposition(
+      steps,
+      composition.beatsPerCycle,
+      compositionUnits(composition.steps),
+    ),
+  };
+}
+export function changeCompositionStep(
+  composition: Composition,
+  id: string,
+  patch: Partial<Pick<CompositionStep, 'bol' | 'units' | 'emphasis'>>,
+): Composition {
+  if (
+    patch.units !== undefined &&
+    (!Number.isInteger(patch.units) || patch.units < 1 || patch.units > 256)
+  )
+    throw new Error('Duration must be between ¼ and 64 beats.');
+  if (
+    patch.emphasis !== undefined &&
+    (!Number.isFinite(patch.emphasis) ||
+      patch.emphasis < 0.2 ||
+      patch.emphasis > 1.25)
+  )
+    throw new Error('Emphasis must be between 20% and 125%.');
+  const steps = composition.steps.map((step) =>
+    step.id === id ? { ...step, ...patch } : step,
+  );
+  return {
+    ...composition,
+    steps: fitComposition(
+      steps,
+      composition.beatsPerCycle,
+      compositionUnits(composition.steps),
+    ),
+  };
+}
+export function resizeComposition(
+  composition: Composition,
+  beats: number,
+): Composition {
+  const cycles =
+    compositionUnits(composition.steps) / (composition.beatsPerCycle * 4);
+  return {
+    ...composition,
+    beatsPerCycle: beats,
+    steps: fitComposition(composition.steps, beats, cycles * beats * 4),
+  };
+}
+export function compositionTimeline(composition: Composition) {
+  let start = 0;
+  return composition.steps.map((step) => {
+    const event = { ...step, start };
+    start += step.units;
+    return event;
+  });
+}
+export function parseComposition(value: unknown): Composition {
+  const data = value as Composition;
+  const allowed = new Set<string | null>([
+    ...STROKES.map((step) => step.bol),
+    'Rest',
+    null,
+  ]);
+  if (
+    !data ||
+    data.version !== 1 ||
+    typeof data.name !== 'string' ||
+    data.name.length > 100 ||
+    !Number.isInteger(data.beatsPerCycle) ||
+    data.beatsPerCycle < 1 ||
+    data.beatsPerCycle > 64 ||
+    !Array.isArray(data.steps) ||
+    !data.steps.length ||
+    data.steps.length > 16384
+  )
+    throw new Error('Choose a valid Taal composition file.');
+  for (const step of data.steps) {
+    if (
+      !step ||
+      !allowed.has(step.bol) ||
+      !Number.isInteger(step.units) ||
+      step.units < 1 ||
+      step.units > 256 ||
+      !Number.isFinite(step.emphasis) ||
+      step.emphasis < 0.2 ||
+      step.emphasis > 1.25
+    )
+      throw new Error(
+        'The composition contains an invalid bol, duration, or emphasis.',
+      );
+  }
+  const units = compositionUnits(data.steps);
+  if (units > 16384 || units % (data.beatsPerCycle * 4) !== 0)
+    throw new Error('The composition must contain complete cycles.');
+  return {
+    version: 1,
+    name: data.name,
+    beatsPerCycle: data.beatsPerCycle,
+    steps: data.steps.map((step) => ({
+      id: crypto.randomUUID(),
+      bol: step.bol,
+      units: step.units,
+      emphasis: step.emphasis,
+    })),
+  };
+}

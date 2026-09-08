@@ -30,3 +30,17 @@ The runnable check validates all pattern voices, tempo limits, wraparound, key u
 ## Design
 
 The actual instrument leads the page. Ivory skin and rawhide inform the neutral stage; indigo practice controls contrast with the wood and metal drums. Bricolage Grotesque gives the studio a compact musical character, with Manrope for controls. Layout adapts to a vertical studio on phones and supports reduced motion and visible keyboard focus.
+
+## Composition maker
+
+Use **Compose** to drag bols or explicit rests into the timeline and reorder placed strokes. A selected bol has independent duration (¼–64 beats) and emphasis (20–125%). Duration is the time before the next stroke; it does not pitch-shift or time-stretch a sample. Longer strokes shift subsequent material and add whole cycles without discarding notes. Set 1–64 beats per cycle, add whole cycles, or load a traditional taal as an editable starting point.
+
+Mouse dragging uses native HTML drag and drop. Touch and pen use pointer dragging. Keyboard users can select a palette bol, activate an empty beat, and use Earlier/Later controls. Editing stops playback; tempo can change while playing. The metronome stays on the beat grid independently of note duration, and the studio recorder captures composition playback.
+
+The latest draft saves to browser localStorage. Export/import JSON preserves the full composition; Undo retains the last 30 edits in the current tab. A new composition is reversible with Undo. Composition import validates the bol, timing, cycle alignment, and emphasis fields.
+
+```sh
+node --experimental-strip-types scripts/check-composition.mjs
+```
+
+This check covers drag insertion/reordering, exact fractional timing, rests, cycle extension and resizing, round-trip storage, and invalid inputs.

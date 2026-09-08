@@ -9,6 +9,9 @@ import {
   nextBeat,
   tempoSeconds,
   type Taal,
+  type Composition,
+  compositionTimeline,
+  compositionUnits,
 } from '@/lib/tabla';
 import {
   AudioLines,
@@ -33,6 +36,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import CompositionMaker from './composition-maker';
 
 export default function Home() {
   const [bpm, setBpm] = useState(90);
@@ -40,6 +44,10 @@ export default function Home() {
   const [taal, setTaal] = useState<Taal>('teentaal');
   const [metronome, setMetronome] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [compositionPlaying, setCompositionPlaying] = useState(false);
+  const [compositionPosition, setCompositionPosition] = useState(-1);
+  const playMode = useRef<'taal' | 'composition' | null>(null);
+  const playbackGeneration = useRef(0);
   const [busy, setBusy] = useState(false);
   const [beat, setBeat] = useState(-1);
   const [active, setActive] = useState<string[]>([]);
@@ -92,6 +100,10 @@ export default function Home() {
     );
   }, []);
   const stopLoop = useCallback(() => {
+    playbackGeneration.current += 1;
+    playMode.current = null;
+    setCompositionPlaying(false);
+    setCompositionPosition(-1);
     if (scheduler.current) clearInterval(scheduler.current);
     scheduler.current = null;
     timers.current.forEach(clearTimeout);
@@ -154,14 +166,14 @@ export default function Home() {
   }, [recording, stopRecording]);
 
   const strike = useCallback(
-    async (bol: string) => {
+    async (bol: string, emphasis = 1) => {
       if (!engine.current) return;
       try {
         await engine.current.unlock();
         if (!mounted.current) return;
         setReady(true);
         setError('');
-        engine.current.play(bol);
+        engine.current.play(bol, undefined, false, emphasis);
         flash(bol);
       } catch (err) {
         fail(err);
@@ -169,20 +181,29 @@ export default function Home() {
     },
     [flash],
   );
-  async function toggleLoop() {
+  async function toggleLoop(composition?: Composition) {
+    const mode = composition ? 'composition' : 'taal';
     if (scheduler.current) {
+      const sameMode = playMode.current === mode;
       stopLoop();
-      return;
+      if (sameMode) return;
     }
     if (pending.current || !engine.current) return;
+    const generation = ++playbackGeneration.current;
     pending.current = true;
     setBusy(true);
     try {
       await engine.current.unlock();
-      if (!mounted.current) return;
+      if (!mounted.current || generation !== playbackGeneration.current) return;
       setReady(true);
       setError('');
-      let index = 0;
+      const events = composition
+        ? new Map(
+            compositionTimeline(composition).map((step) => [step.start, step]),
+          )
+        : null;
+      const totalUnits = composition ? compositionUnits(composition.steps) : 0;
+      let unit = 0;
       let when = engine.current.context!.currentTime + 0.04;
       const tick = () => {
         const audio = engine.current!;
@@ -191,27 +212,46 @@ export default function Home() {
         while (when < now + 0.1) {
           const cfg = config.current;
           const sequence = TAALS[cfg.taal];
-          index %= sequence.beats.length;
-          const current = index;
-          const bol = sequence.beats[index];
-          audio.play(bol, when, true, index === 0 ? 0.85 : 0.68);
-          if (cfg.metronome) audio.click(when, index === 0);
+          const count = composition ? totalUnits : sequence.beats.length * 4;
+          unit %= count;
+          const current = unit;
+          const beatIndex = Math.floor(unit / 4);
+          const event = events?.get(unit);
+          const bol = composition
+            ? event?.bol
+            : unit % 4 === 0
+              ? sequence.beats[beatIndex]
+              : null;
+          const velocity = composition
+            ? (event?.emphasis ?? 0.8)
+            : beatIndex === 0
+              ? 0.85
+              : 0.68;
+          if (bol && bol !== 'Rest') audio.play(bol, when, true, velocity);
+          const cycleLength = composition
+            ? composition.beatsPerCycle
+            : sequence.beats.length;
+          if (cfg.metronome && unit % 4 === 0)
+            audio.click(when, beatIndex % cycleLength === 0);
           const timer = setTimeout(
             () => {
               timers.current.delete(timer);
-              setBeat(current);
-              flash(bol);
+              if (composition) setCompositionPosition(current);
+              else setBeat(beatIndex);
+              if (bol && bol !== 'Rest') flash(bol);
             },
             Math.max(0, (when - now) * 1000),
           );
           timers.current.add(timer);
-          when += tempoSeconds(cfg.bpm);
-          index = nextBeat(index, sequence.beats.length);
+          when += tempoSeconds(cfg.bpm) / 4;
+          unit = nextBeat(unit, count);
         }
       };
+      playMode.current = mode;
       tick();
       scheduler.current = setInterval(tick, 25);
-      setPlaying(true);
+      setPlaying(mode === 'taal');
+      setCompositionPlaying(mode === 'composition');
     } catch (err) {
       fail(err);
     } finally {
@@ -237,7 +277,8 @@ export default function Home() {
       if (event.code === 'Space') {
         if (target.closest('button,a,summary')) return;
         event.preventDefault();
-        void toggleLoopRef.current();
+        if (playMode.current === 'composition') stopLoop();
+        else void toggleLoopRef.current();
         return;
       }
       const stroke = STROKES.find(
@@ -250,7 +291,7 @@ export default function Home() {
     };
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
-  }, [strike]);
+  }, [strike, stopLoop]);
   async function toggleRecording() {
     if (recorder.current?.state === 'recording') {
       stopRecording();
@@ -403,6 +444,7 @@ export default function Home() {
         </a>
         <nav>
           <span className="nav-active">Tabla studio</span>
+          <a href="#compose">Compose</a>
           <a href="#guide">
             How to play <ArrowUpRight size={14} />
           </a>
@@ -705,6 +747,22 @@ export default function Home() {
             </section>
           </aside>
         </div>
+        <CompositionMaker
+          bpm={bpm}
+          setBpm={setBpm}
+          playing={compositionPlaying}
+          position={compositionPosition}
+          onPlay={(composition) => toggleLoop(composition)}
+          onStop={stopLoop}
+          onEdit={stopLoop}
+          onPreview={(bol, emphasis) => {
+            void strike(bol, emphasis);
+          }}
+          recording={recording}
+          onRecord={() => {
+            void toggleRecording();
+          }}
+        />
         <section className="guide-strip" id="guide">
           <div className="guide-symbol">
             <Keyboard size={22} />
