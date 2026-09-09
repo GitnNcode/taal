@@ -8,6 +8,7 @@ import {
 } from 'react';
 import {
   GripVertical,
+  LoaderCircle,
   Plus,
   Minus,
   Play,
@@ -32,6 +33,10 @@ import {
 } from '@/components/ui/select';
 import {
   STROKES,
+  MIN_BPM,
+  MAX_BPM,
+  COMPOSITION_BOLS,
+  bolDescription,
   TAALS,
   newComposition,
   fitComposition,
@@ -42,6 +47,8 @@ import {
   changeCompositionStep,
   resizeComposition,
   parseComposition,
+  parseBolScript,
+  formatBolScript,
   type Composition,
   type CompositionStep,
   type Taal,
@@ -52,6 +59,7 @@ const STORAGE_KEY = 'taal-composition-v1';
 const durationLabel = (units: number) =>
   `${units / 4} ${units === 4 ? 'beat' : 'beats'}`;
 export default function CompositionMaker({
+  audioReady,
   bpm,
   setBpm,
   playing,
@@ -63,6 +71,7 @@ export default function CompositionMaker({
   recording,
   onRecord,
 }: {
+  audioReady: boolean;
   bpm: number;
   setBpm: (value: number) => void;
   playing: boolean;
@@ -70,7 +79,7 @@ export default function CompositionMaker({
   onPlay: (composition: Composition) => Promise<void>;
   onStop: () => void;
   onEdit: () => void;
-  onPreview: (bol: string, emphasis?: number) => void;
+  onPreview: (bol: string, emphasis?: number, units?: number) => void;
   recording: boolean;
   onRecord: () => void;
 }) {
@@ -84,6 +93,9 @@ export default function CompositionMaker({
     label: string;
   } | null>(null);
   const [notice, setNotice] = useState('');
+  const [bolSearch, setBolSearch] = useState('');
+  const [script, setScript] = useState('');
+  const [scriptError, setScriptError] = useState('');
   const [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false);
   const [history, setHistory] = useState<Composition[]>([]);
@@ -277,6 +289,28 @@ export default function CompositionMaker({
     );
     setSelected(steps[0].id);
   }
+  function applyScript(replace: boolean) {
+    try {
+      const added = parseBolScript(script);
+      const previous = current.current!;
+      const existing = [...previous.steps];
+      while (existing.length && existing.at(-1)!.bol === null) existing.pop();
+      const steps = fitComposition(
+        replace ? added : [...existing, ...added],
+        previous.beatsPerCycle,
+      );
+      edit(
+        { ...previous, steps },
+        `${added.length} bols ${replace ? 'loaded' : 'added'}. Select any bol to adjust its length and emphasis.`,
+      );
+      setSelected(added[0].id);
+      setScriptError('');
+    } catch (err) {
+      setScriptError(
+        err instanceof Error ? err.message : 'Could not read these bols.',
+      );
+    }
+  }
   const dragEvents = (dragged: Source, label: string) => ({
     draggable: true,
     onDragStart: (e: DragEvent<HTMLButtonElement>) =>
@@ -348,7 +382,7 @@ export default function CompositionMaker({
           <div>
             <button
               aria-label="Decrease composition tempo"
-              onClick={() => setBpm(Math.max(40, bpm - 5))}
+              onClick={() => setBpm(Math.max(MIN_BPM, bpm - 5))}
             >
               <Minus size={15} />
             </button>
@@ -356,7 +390,7 @@ export default function CompositionMaker({
             <span>BPM</span>
             <button
               aria-label="Increase composition tempo"
-              onClick={() => setBpm(Math.min(240, bpm + 5))}
+              onClick={() => setBpm(Math.min(MAX_BPM, bpm + 5))}
             >
               <Plus size={15} />
             </button>
@@ -384,7 +418,7 @@ export default function CompositionMaker({
           </button>
           <button
             className="primary-button composition-play"
-            disabled={starting || (!hasNotes && !playing)}
+            disabled={!audioReady || starting || (!hasNotes && !playing)}
             onClick={async () => {
               if (playing) {
                 onStop();
@@ -398,13 +432,15 @@ export default function CompositionMaker({
               }
             }}
           >
-            {playing ? (
+            {starting ? (
+              <LoaderCircle size={15} className="audio-loading-spinner" />
+            ) : playing ? (
               <Square size={15} fill="currentColor" />
             ) : (
               <Play size={15} fill="currentColor" />
             )}
             {starting
-              ? 'Starting…'
+              ? 'Starting audio…'
               : playing
                 ? 'Stop composition'
                 : 'Play composition'}
@@ -418,16 +454,91 @@ export default function CompositionMaker({
           </button>
         </div>
       </div>
+      <details className="bol-script">
+        <summary>Write a composition with bols</summary>
+        <label htmlFor="bol-script-input">Comma-separated bols</label>
+        <p id="bol-script-help">
+          Each bol defaults to one beat. Add a length in parentheses, such as
+          Terekete(2), and emphasis in brackets, such as Terekete(2)[90]. The
+          bracket number is already a percent, so do not add a % sign. Use Rest,
+          Pause, or - for silence. Extra space is filled to complete your chosen
+          cycle.
+        </p>
+        <textarea
+          id="bol-script-input"
+          rows={3}
+          placeholder="Dha(2)[110], Dhin[70], Terekete(0.5)[90], Rest(2), Na"
+          value={script}
+          onChange={(event) => {
+            setScript(event.target.value);
+            setScriptError('');
+          }}
+          aria-describedby="bol-script-help bol-script-error"
+          aria-invalid={!!scriptError}
+          spellCheck={false}
+        />
+        <p id="bol-script-error" role="alert">
+          {scriptError}
+        </p>
+        <div className="bol-script-actions">
+          <button
+            className="secondary-button"
+            disabled={!hasNotes}
+            onClick={() => {
+              setScript(formatBolScript(composition.steps));
+              setScriptError('');
+              setNotice('Current timeline copied to the text box.');
+            }}
+          >
+            Current timeline → text
+          </button>
+          <button
+            className="primary-button"
+            disabled={!script.trim()}
+            onClick={() => applyScript(false)}
+          >
+            Add to composition
+          </button>
+          <button
+            className="secondary-button"
+            disabled={!script.trim()}
+            onClick={() => applyScript(true)}
+          >
+            Replace composition
+          </button>
+          <span>Copying to text does not change your timeline.</span>
+        </div>
+      </details>
       <div className="composer-body">
         <div className="composition-workspace">
+          <div className="bol-library-search">
+            <label htmlFor="bol-search">
+              Bol & phrase library <span>{COMPOSITION_BOLS.length} sounds</span>
+            </label>
+            <input
+              id="bol-search"
+              type="search"
+              placeholder="Find a bol… e.g. Terekete, Kran, Dhage"
+              value={bolSearch}
+              onChange={(e) => setBolSearch(e.target.value)}
+            />
+          </div>
           <div
             className="bol-palette"
             aria-label="Drag a bol or rest into your composition"
           >
-            {[...STROKES.map((step) => step.bol), 'Rest' as const].map(
-              (bol) => (
+            {[...COMPOSITION_BOLS, 'Rest' as const]
+              .filter(
+                (bol) =>
+                  bol === 'Rest' ||
+                  (bol + ' ' + bolDescription(bol))
+                    .toLowerCase()
+                    .includes(bolSearch.trim().toLowerCase()),
+              )
+              .map((bol) => (
                 <button
                   key={bol}
+                  title={bolDescription(bol)}
                   className={`palette-bol ${brush === bol ? 'brush-active' : ''} ${bol === 'Rest' ? 'rest-palette' : ''}`}
                   aria-pressed={brush === bol}
                   aria-label={`Drag ${bol}, or select then click an empty beat`}
@@ -442,8 +553,7 @@ export default function CompositionMaker({
                   {bol === 'Rest' && <Pause size={13} />}
                   <span>{bol}</span>
                 </button>
-              ),
-            )}
+              ))}
           </div>
           <div className="composition-hint">
             <span>
@@ -638,12 +748,17 @@ export default function CompositionMaker({
                   <button
                     className="preview-bol"
                     aria-label={`Preview ${chosen.bol}`}
-                    onClick={() => onPreview(chosen.bol!, chosen.emphasis)}
+                    onClick={() =>
+                      onPreview(chosen.bol!, chosen.emphasis, chosen.units)
+                    }
                   >
                     <Play size={17} />
                   </button>
                 )}
               </div>
+              <p className="inspector-help bol-breakdown">
+                {bolDescription(chosen.bol)}
+              </p>
               <label className="inspector-label" id="duration-label">
                 Time before next bol
               </label>
@@ -844,7 +959,7 @@ export default function CompositionMaker({
       </div>
       <p className="composer-notice" role="status" aria-live="polite">
         {notice ||
-          'Empty beats are silent. Playback loops through all cycles. Record captures the composition too.'}
+          'Phrases divide their duration between strokes. Additional articulations use approximate sample voicings; Kran uses Ke–Te–Na. Empty beats are silent.'}
       </p>
       {ghost && (
         <div

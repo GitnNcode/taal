@@ -44,3 +44,16 @@ node --experimental-strip-types scripts/check-composition.mjs
 ```
 
 This check covers drag insertion/reordering, exact fractional timing, rests, cycle extension and resizing, round-trip storage, and invalid inputs.
+
+## Extended bol library
+
+The composition maker includes 59 entries: core strokes, common alternate names, and 26 phrases. Search the palette to find Terekete, Tirakita, Tirkit, Tetekete, Kre, Kra, Kran, Dhage, Dhatigena, Tirakitataka, Gadigena, and others. Select a placed phrase to see its stroke breakdown. Preview and composition playback both respect its duration and emphasis. A four-stroke phrase uses four evenly spaced attacks within its assigned time; Kre/Kra use a short flam. Rest remains silent.
+
+This is a practical library, not an exhaustive catalogue of every gharana's vocabulary. Extra articulations are approximations assembled from the five original samples and modeled Tin; they are not separate authentic recordings. Kran is an explicitly labeled Ke–Te–Na approximation because a universal fingering for that spelling was not established. Individual components can also be placed separately to represent your teacher's version.
+
+References used for the vocabulary and playback notes:
+- Riyaaz Academy / Kuljit Bhamra, *The Essential Guide to Starting Out on Tabla*: https://riyaazacademy.com/wp-content/uploads/2020/04/ESSENTIAL-FREE-GUIDE-TO-TABLA.pdf — aliases and Kre as a Ke + Te flam.
+- DigiTabla bol demonstrations: https://digitabla.com/reference/tabla-bols/bol-demonstrations/ — distinguishes single strokes and phrases.
+- NYU Theory & Practice I: https://sites.google.com/nyu.edu/theoryandpractice1/course-content/unit-4-rhythm-meter/north-indian-taal — foundational articulations and Tirakita.
+
+Check the extended library with `node --experimental-strip-types scripts/check-bol-library.mjs`.

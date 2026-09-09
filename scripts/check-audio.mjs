@@ -12,7 +12,9 @@ for (const taal of Object.values(TAALS)) {
 assert.equal(new Set(STROKES.map((s) => s.key)).size, STROKES.length);
 assert.equal(tempoSeconds(120), 0.5);
 assert.equal(tempoSeconds(0), 1.5);
-assert.equal(tempoSeconds(500), 0.25);
+assert.equal(tempoSeconds(500), 0.12);
+assert.equal(tempoSeconds(600), 0.1);
+assert.equal(tempoSeconds(1000), 0.1);
 assert.deepEqual(PARTS.Dha, ['ge', 'na']);
 assert.deepEqual(PARTS.Dhin, ['ge', 'tin']);
 for (const bol of new Set(Object.values(PARTS).flat())) {

@@ -8,7 +8,7 @@ export const STROKES = [
   { bol: 'Dha', key: 'J', note: 'Both drums' },
   { bol: 'Dhin', key: 'K', note: 'Ringing pair' },
 ] as const;
-export type Bol = (typeof STROKES)[number]['bol'];
+export type Bol = (typeof COMPOSITION_BOLS)[number];
 export const TAALS = {
   teentaal: {
     name: 'Teentaal',
@@ -47,11 +47,138 @@ export const PARTS: Record<string, string[]> = {
   Ka: ['ke'],
   Dhi: ['ge', 'tin'],
 };
+// Additional articulations use the nearest available sample, not new recordings.
+export const EXTRA_STROKES = {
+  Ta: ['na'],
+  Ti: ['te'],
+  Re: ['te'],
+  Ri: ['te'],
+  Ra: ['te'],
+  Ne: ['te'],
+  Ghe: ['ge'],
+  Ga: ['ge'],
+  Gi: ['ge'],
+  Ka: ['ke'],
+  Ki: ['ke'],
+  Ko: ['ke'],
+  Kat: ['ke'],
+  Kot: ['ke'],
+  Tak: ['te'],
+  Tet: ['te'],
+  Tu: ['tun'],
+  Thun: ['tun'],
+  Din: ['tun'],
+  Dhi: ['ge', 'tin'],
+  Dhe: ['ge', 'te'],
+  Dhet: ['ge', 'te'],
+  Dhun: ['ge', 'tun'],
+  Dhit: ['ge', 'te'],
+} as const;
+Object.assign(PARTS, EXTRA_STROKES);
+export const PHRASES = {
+  Terekete: ['Te', 'Re', 'Ke', 'Te'],
+  Tirakita: ['Ti', 'Ra', 'Ki', 'Ta'],
+  Tirkit: ['Ti', 'Ra', 'Ki', 'Ta'],
+  Tetekete: ['Te', 'Te', 'Ke', 'Te'],
+  Tite: ['Ti', 'Te'],
+  Tete: ['Te', 'Te'],
+  Tita: ['Ti', 'Ta'],
+  Kita: ['Ki', 'Ta'],
+  Kete: ['Ke', 'Te'],
+  Taka: ['Ta', 'Ka'],
+  Dhage: ['Dha', 'Ge'],
+  Dhati: ['Dha', 'Ti'],
+  Dhagena: ['Dha', 'Ge', 'Na'],
+  Dhatigena: ['Dha', 'Ti', 'Ge', 'Na'],
+  Dhatidhage: ['Dha', 'Ti', 'Dha', 'Ge'],
+  Dhatirakita: ['Dha', 'Ti', 'Ra', 'Ki', 'Ta'],
+  Tirakitataka: ['Ti', 'Ra', 'Ki', 'Ta', 'Ta', 'Ka'],
+  Dhinna: ['Dhin', 'Na'],
+  Tinna: ['Tin', 'Na'],
+  Tunna: ['Tun', 'Na'],
+  Gadigena: ['Ga', 'Di', 'Ge', 'Na'],
+  Digidigi: ['Di', 'Gi', 'Di', 'Gi'],
+  Dhadha: ['Dha', 'Dha'],
+  Kre: ['Ke', 'Te'],
+  Kra: ['Ke', 'Te'],
+  // Sample approximation: a Kre flam followed by Dhit.
+  Kredhit: ['Ke', 'Te', 'Dhit'],
+  // User-requested spelling; this editable-composition approximation is not a universal fingering.
+  Kran: ['Ke', 'Te', 'Na'],
+} as const;
+PARTS.Di = ['te'];
+export const COMPOSITION_BOLS = [
+  ...STROKES.map((stroke) => stroke.bol),
+  ...(Object.keys(EXTRA_STROKES) as (keyof typeof EXTRA_STROKES)[]),
+  'Di',
+  ...(Object.keys(PHRASES) as (keyof typeof PHRASES)[]),
+] as const;
+export function bolHits(bol: string, durationSeconds: number) {
+  const phrase = PHRASES[bol as keyof typeof PHRASES];
+  if (!phrase) return PARTS[bol] ? [{ bol, offset: 0 }] : [];
+  const span = Math.max(0.001, durationSeconds);
+  return phrase.map((stroke, index) => ({
+    bol: stroke,
+    offset:
+      bol === 'Kredhit'
+        ? index === 2
+          ? span / 2
+          : index * Math.min(0.025, span / 4)
+        : bol === 'Kre' || bol === 'Kra'
+          ? index * Math.min(0.025, span / phrase.length)
+          : (index * span) / phrase.length,
+  }));
+}
+export function bolDescription(bol: string) {
+  if (bol === 'Rest') return 'Silence for the selected duration';
+  if (bol === 'Kredhit')
+    return 'Sample approximation: Kre flam → Dhit within the selected duration';
+  if (bol === 'Kran')
+    return 'Approximation: Ke → Te → Na; articulation varies by tradition';
+  if (bol === 'Kre' || bol === 'Kra')
+    return 'Ke + Te flam (closely spaced strokes)';
+  const phrase = PHRASES[bol as keyof typeof PHRASES];
+  if (phrase) return phrase.join(' → ') + ' within the selected duration';
+  return bol in EXTRA_STROKES || bol === 'Di'
+    ? 'Sample-based approximation of this articulation'
+    : 'Core tabla stroke';
+}
 export function nextBeat(index: number, count: number) {
   return (index + 1) % count;
 }
+export const MIN_BPM = 40;
+export const MAX_BPM = 600;
+
 export function tempoSeconds(bpm: number) {
-  return 60 / Math.max(40, Math.min(240, bpm));
+  return 60 / Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
+}
+
+// Drive visuals from the sample frame at the output device, not the render-ahead clock.
+export function audibleContextTime(
+  ctx: Pick<
+    AudioContext,
+    'currentTime' | 'state' | 'baseLatency' | 'outputLatency'
+  > & { getOutputTimestamp?: () => AudioTimestamp },
+): number {
+  if (ctx.state !== 'running') return -Infinity;
+  if (typeof ctx.getOutputTimestamp === 'function') {
+    const stamp = ctx.getOutputTimestamp();
+    if (
+      Number.isFinite(stamp.contextTime) &&
+      Number.isFinite(stamp.performanceTime)
+    ) {
+      // A zero timestamp means output has not begun yet. Do not advance the playhead.
+      if (stamp.performanceTime === 0) return -Infinity;
+      return Math.min(ctx.currentTime, stamp.contextTime!) - 0.006;
+    }
+  }
+  // Older browsers: use their latency estimates, including compressor look-ahead.
+  return (
+    ctx.currentTime -
+    Math.max(0, ctx.baseLatency || 0) -
+    Math.max(0, ctx.outputLatency || 0) -
+    0.006
+  );
 }
 
 export class TablaAudio {
@@ -60,6 +187,8 @@ export class TablaAudio {
   destination: MediaStreamAudioDestinationNode | null = null;
   private buffers: Record<string, AudioBuffer> = {};
   private loading: Promise<void> | null = null;
+  private loaded = false;
+  private resuming: Promise<void> | null = null;
   private voices = new Map<AudioScheduledSourceNode, boolean>();
   private closed = false;
   init() {
@@ -90,7 +219,10 @@ export class TablaAudio {
     if (!this.loading)
       this.loading = Promise.all(
         ['na', 'tun', 'te', 'ge', 'ke'].map(async (bol) => {
-          const response = await fetch(`/audio/${bol}.wav`);
+          if (this.buffers[bol]) return;
+          const response = await fetch(`/audio/${bol}.wav`, {
+            signal: AbortSignal.timeout(8000),
+          });
           if (!response.ok)
             throw new Error(
               'The tabla sounds could not load. Check your connection and retry.',
@@ -119,21 +251,45 @@ export class TablaAudio {
           this.buffers[bol] = buffer;
         }),
       )
-        .then(() => undefined)
+        .then(() => {
+          this.loaded = !this.closed;
+        })
         .catch((error) => {
           this.loading = null;
           throw error;
         });
     return this.loading;
   }
-  async unlock() {
+  unlock(): Promise<void> | undefined {
+    if (this.closed)
+      throw new Error('Audio has been closed. Reload the studio.');
     const ctx = this.init();
-    await ctx.resume();
-    await this.load();
-    if (ctx.state !== 'running')
-      throw new Error(
-        'Audio is paused by your browser. Tap a stroke to enable sound.',
-      );
+    // Safari may defer resume() promises; never call it for an already-running context.
+    if (ctx.state === 'running' && this.loaded) return;
+    if (this.resuming) return this.resuming;
+    const resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
+    let timeout: ReturnType<typeof setTimeout>;
+    this.resuming = Promise.race([
+      Promise.all([resume, this.load()]).then(() => {
+        if (ctx.state !== 'running')
+          throw new Error('Audio is paused. Tap Play again to enable sound.');
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'Audio did not start. Tap Play again; if it persists, reload the page and check your sound output.',
+              ),
+            ),
+          3000,
+        );
+      }),
+    ]).finally(() => {
+      clearTimeout(timeout);
+      this.resuming = null;
+    });
+    return this.resuming;
   }
   volume(value: number) {
     if (this.master && this.context)
@@ -156,10 +312,16 @@ export class TablaAudio {
     time = this.context?.currentTime ?? 0,
     loop = false,
     velocity = 1,
+    durationSeconds = 2 / 3,
   ) {
     if (!this.context || !this.master || this.closed) return;
     const ctx = this.context;
     const when = Math.max(time, ctx.currentTime);
+    if (bol in PHRASES) {
+      for (const hit of bolHits(bol, durationSeconds))
+        this.play(hit.bol, when + hit.offset, loop, velocity);
+      return;
+    }
     for (const part of PARTS[bol] || []) {
       if (part === 'tin') {
         // Modeled Tin: tuned membrane partials, explicitly identified in the sound notes.
@@ -246,6 +408,77 @@ export function compositionStep(
   units = 4,
 ): CompositionStep {
   return { id: crypto.randomUUID(), bol, units, emphasis: 0.8 };
+}
+export function formatBolScript(steps: CompositionStep[]): string {
+  const meaningful = [...steps];
+  while (meaningful.at(-1)?.bol === null) meaningful.pop();
+  return meaningful
+    .map((step) => {
+      const bol = step.bol ?? 'Rest';
+      const length = step.units === 4 ? '' : `(${step.units / 4})`;
+      const percent = Number((step.emphasis * 100).toFixed(4));
+      const emphasis = percent === 80 ? '' : `[${percent}]`;
+      return `${bol}${length}${emphasis}`;
+    })
+    .join(', ');
+}
+export function parseBolScript(text: string): CompositionStep[] {
+  const tokens = text
+    .split(/[,\n]/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (!tokens.length)
+    throw new Error('Write at least one bol, separated by commas.');
+  if (tokens.length > 4096)
+    throw new Error('Use at most 4,096 bols at a time.');
+  const names = new Map<string, CompositionStep['bol']>(
+    [...COMPOSITION_BOLS, 'Rest' as const].map((bol) => [
+      bol.toLowerCase(),
+      bol,
+    ]),
+  );
+  names.set('pause', 'Rest');
+  names.set('-', 'Rest');
+  const parsed = tokens.map((token) => {
+    const match =
+      /^([^()[\]]+?)(?:\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\))?(?:\[\s*(\d+(?:\.\d+)?|\.\d+)\s*\])?$/.exec(
+        token,
+      );
+    if (!match)
+      throw new Error(
+        `Could not read “${token}”. Try a bol, bol(length), or bol(length)[emphasis], such as Terekete(2)[90].`,
+      );
+    const beats = match[2] === undefined ? 1 : Number(match[2]);
+    if (beats < 0.25 || beats > 4096 || !Number.isInteger(beats * 4))
+      throw new Error(
+        `The length in “${token}” must be 0.25–4,096 beats, in quarter-beat steps.`,
+      );
+    const percent = match[3] === undefined ? 80 : Number(match[3]);
+    if (percent < 20 || percent > 125)
+      throw new Error(
+        `The emphasis in “${token}” must be a number from 20–125, without a % sign.`,
+      );
+    return {
+      name: match[1].trim(),
+      units: beats * 4,
+      emphasis: percent / 100,
+    };
+  });
+  const unknown = [
+    ...new Set(
+      parsed
+        .filter(({ name }) => !names.has(name.toLowerCase()))
+        .map(({ name }) => name),
+    ),
+  ];
+  if (unknown.length)
+    throw new Error(
+      `Unknown bols: ${unknown.slice(0, 8).join(', ')}. Check the bol library for spellings.`,
+    );
+  return parsed.map(({ name, units, emphasis }) => ({
+    ...compositionStep(names.get(name.toLowerCase())!, units),
+    emphasis,
+  }));
 }
 export function fitComposition(
   steps: CompositionStep[],
@@ -364,11 +597,7 @@ export function compositionTimeline(composition: Composition) {
 }
 export function parseComposition(value: unknown): Composition {
   const data = value as Composition;
-  const allowed = new Set<string | null>([
-    ...STROKES.map((step) => step.bol),
-    'Rest',
-    null,
-  ]);
+  const allowed = new Set<string | null>([...COMPOSITION_BOLS, 'Rest', null]);
   if (
     !data ||
     data.version !== 1 ||
