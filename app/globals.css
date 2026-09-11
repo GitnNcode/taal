@@ -275,6 +275,9 @@ h1 {
   top: 10%;
 }
 .drum-hit > span {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
   background: #fffef1e6;
   color: #292f36;
   padding: 5px 11px;
@@ -286,8 +289,13 @@ h1 {
 }
 .drum-hit:hover > span,
 .drum-hit:focus-visible > span,
-.drum-hit.hit > span {
+.drum-hit > span.region-active {
   opacity: 1;
+}
+.drum-hit > span.region-active {
+  background: #dce5ff;
+  box-shadow: 0 0 0 2px #6e85d6;
+  z-index: 1;
 }
 .drum-hit.hit,
 .drum-hit.hit > span,

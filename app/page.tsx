@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import CompositionMaker from './composition-maker';
+import { DRUM_REGIONS, drumBolAt } from '@/lib/drum-regions';
 
 export default function Home() {
   const [bpm, setBpm] = useState(90);
@@ -491,21 +492,12 @@ export default function Home() {
   ) {
     event.preventDefault();
     const rect = event.currentTarget.getBoundingClientRect();
-    const distance = Math.hypot(
-      (event.clientX - rect.left - rect.width / 2) / (rect.width / 2),
-      (event.clientY - rect.top - rect.height / 2) / (rect.height / 2),
+    const bol = drumBolAt(
+      side,
+      (event.clientX - rect.left) / rect.width,
+      (event.clientY - rect.top) / rect.height,
     );
-    void strike(
-      side === 'bayan'
-        ? distance < 0.62
-          ? 'Ge'
-          : 'Ke'
-        : distance < 0.43
-          ? 'Tun'
-          : distance < 0.76
-            ? 'Tin'
-            : 'Na',
-    );
+    if (bol) void strike(bol);
   }
   useEffect(() => {
     type Tool = {
@@ -686,29 +678,35 @@ export default function Home() {
               />
               <button
                 className={`drum-hit bayan ${active.some((b) => ['Ge', 'Ke', 'Dha', 'Dhin'].includes(b)) ? 'hit' : ''}`}
-                aria-label="Play bayan: center Ge, rim Ke"
+                aria-label="Play bayan: center Ke, surrounding head Ge"
                 onPointerDown={(e) => hitDrum(e, 'bayan')}
                 onClick={(e) => {
                   if (e.detail === 0) void strike('Ge');
                 }}
               >
-                <span>
-                  {active.find((b) =>
-                    ['Ge', 'Ke', 'Dha', 'Dhin'].includes(b),
-                  ) || 'Ge'}
-                </span>
+                {DRUM_REGIONS.bayan.map((region) => (
+                  <span key={region.bol}
+                    className={active.some((bol) => PARTS[bol]?.includes(region.voice)) ? 'region-active' : ''}
+                    style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%` }}>
+                    {region.bol}
+                  </span>
+                ))}
               </button>
               <button
                 className={`drum-hit dayan ${active.some((b) => !['Ge', 'Ke'].includes(b)) ? 'hit' : ''}`}
-                aria-label="Play dayan: center Tun, middle Tin, rim Na"
+                aria-label="Play dayan: center Te, upper center Tun, middle ring Tin, rim Na"
                 onPointerDown={(e) => hitDrum(e, 'dayan')}
                 onClick={(e) => {
                   if (e.detail === 0) void strike('Na');
                 }}
               >
-                <span>
-                  {active.find((b) => !['Ge', 'Ke'].includes(b)) || 'Na'}
-                </span>
+                {DRUM_REGIONS.dayan.map((region) => (
+                  <span key={region.bol}
+                    className={active.some((bol) => PARTS[bol]?.includes(region.voice)) ? 'region-active' : ''}
+                    style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%` }}>
+                    {region.bol}
+                  </span>
+                ))}
               </button>
             </div>
             <div className="stage-caption">
