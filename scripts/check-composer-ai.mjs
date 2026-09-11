@@ -308,35 +308,15 @@ const routeJS = ts.transpileModule(routeSource, {
 const fakeEnv = { OPENROUTER_API_KEY: 'server-only-test-secret' };
 let upstream;
 let upstreamFailure;
-let rateLimitSuccess = true;
-let limitedIdentifier;
-class FakeRatelimit {
-  static fixedWindow(limit, window) {
-    assert.equal(limit, 3);
-    assert.equal(window, '1 d');
-    return { limit, window };
-  }
-  async limit(identifier) {
-    limitedIdentifier = identifier;
-    return { success: rateLimitSuccess };
-  }
-}
-class FakeRedis {}
 const routeContext = {
   exports: {},
   process: { env: fakeEnv },
-  crypto,
   URL,
   Response,
   TextDecoder,
-  TextEncoder,
   AbortSignal,
   require: (name) =>
-    name === '@upstash/ratelimit'
-      ? { Ratelimit: FakeRatelimit }
-      : name === '@upstash/redis'
-        ? { Redis: FakeRedis }
-        : name === '@/lib/tabla'
+    name === '@/lib/tabla'
       ? tabla
         : {
             DEFAULT_MODEL,
@@ -357,13 +337,12 @@ assert.deepEqual(
     configured: true,
     model: DEFAULT_MODEL,
     searchWeb: true,
-    dailyMessageLimit: 3,
   },
 );
 assert.equal(
   (await GET(new Request('https://example.com/api/composer')).json())
     .configured,
-  false,
+  true,
 );
 const body = {
   composition: newComposition(),
@@ -420,33 +399,6 @@ assert.match((await (await post(body)).json()).error, /needs credits/);
 upstreamFailure = new Error('private provider detail server-only-test-secret');
 assert.equal((await (await post(body)).json()).error, 'Could not reach OpenRouter. Check your connection and try again.');
 upstreamFailure = undefined;
-Object.assign(fakeEnv, {
-  UPSTASH_REDIS_REST_URL: 'https://redis.example',
-  UPSTASH_REDIS_REST_TOKEN: 'redis-token',
-  RATE_LIMIT_SECRET: 'rate-limit-secret',
-});
-assert.equal(
-  (await GET(new Request('https://taal.example/api/composer')).json())
-    .configured,
-  true,
-);
-const productionPost = () =>
-  POST(
-    new Request('https://taal.example/api/composer', {
-      method: 'POST',
-      headers: {
-        origin: 'https://taal.example',
-        'Content-Type': 'application/json',
-        'x-forwarded-for': '203.0.113.10',
-      },
-      body: JSON.stringify(body),
-    }),
-  );
-rateLimitSuccess = false;
-assert.equal((await productionPost()).status, 429);
-rateLimitSuccess = true;
-assert.equal((await productionPost()).status, 200);
-assert.match(limitedIdentifier, /^[a-f0-9]{64}$/);
 delete fakeEnv.OPENROUTER_API_KEY;
 assert.equal((await post(body)).status, 503);
 assert.equal(

@@ -1,5 +1,3 @@
-import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
 import {
   composerSystemPrompt,
   ComposerError,
@@ -10,13 +8,6 @@ import {
 } from '@/lib/composer-ai';
 import { MAX_BPM, MIN_BPM, parseComposition } from '@/lib/tabla';
 
-const DAILY_MESSAGE_LIMIT = 3;
-let rateLimiter: Ratelimit | undefined;
-
-function localRequest(request: Request) {
-  const url = new URL(request.url);
-  return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-}
 function sameOrigin(request: Request) {
   return request.headers.get('origin') === new URL(request.url).origin;
 }
@@ -24,59 +15,16 @@ function key() {
   const value = process.env.OPENROUTER_API_KEY;
   return typeof value === 'string' ? value.trim() : '';
 }
-function rateLimitConfigured() {
-  return !!(
-    process.env.UPSTASH_REDIS_REST_URL &&
-    process.env.UPSTASH_REDIS_REST_TOKEN &&
-    process.env.RATE_LIMIT_SECRET
-  );
-}
-function limiter() {
-  if (!rateLimiter) {
-    rateLimiter = new Ratelimit({
-      redis: new Redis({
-        url: process.env.UPSTASH_REDIS_REST_URL!,
-        token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-      }),
-      limiter: Ratelimit.fixedWindow(DAILY_MESSAGE_LIMIT, '1 d'),
-      prefix: 'taal:composer',
-    });
-  }
-  return rateLimiter;
-}
-async function visitorId(request: Request) {
-  const address =
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    request.headers.get('x-real-ip') ||
-    'unknown';
-  const signingKey = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(process.env.RATE_LIMIT_SECRET!),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign(
-    'HMAC',
-    signingKey,
-    new TextEncoder().encode(address),
-  );
-  return Array.from(new Uint8Array(signature), (byte) =>
-    byte.toString(16).padStart(2, '0'),
-  ).join('');
-}
 const json = (body: unknown, status = 200) =>
   Response.json(body, {
     status,
     headers: { 'Cache-Control': 'no-store' },
   });
-export function GET(request: Request) {
+export function GET() {
   return json({
-    configured:
-      !!key() && (localRequest(request) || rateLimitConfigured()),
+    configured: !!key(),
     model: DEFAULT_MODEL,
     searchWeb: true,
-    dailyMessageLimit: DAILY_MESSAGE_LIMIT,
   });
 }
 export async function POST(request: Request) {
@@ -90,24 +38,6 @@ export async function POST(request: Request) {
       { error: 'The AI assistant is not configured.' },
       503,
     );
-  if (!localRequest(request)) {
-    if (!rateLimitConfigured())
-      return json({ error: 'The AI message limit is not configured.' }, 503);
-    try {
-      const result = await limiter().limit(await visitorId(request));
-      if (!result.success)
-        return json(
-          { error: 'You have used today’s 3 AI messages. Try again tomorrow.' },
-          429,
-        );
-    } catch {
-      // Never expose a paid shared key when its abuse protection is unavailable.
-      return json(
-        { error: 'The AI message limit is temporarily unavailable.' },
-        503,
-      );
-    }
-  }
   let input;
   try {
     // Bound the body even when a caller omits Content-Length.

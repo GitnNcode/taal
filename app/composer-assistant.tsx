@@ -347,8 +347,7 @@ export default function ComposerAssistant({
             <div className="ai-connection">
               <h3>Hosted AI connection</h3>
               <p>
-                Claude Sonnet 5 with web search is provided by this site. Each
-                visitor can send three messages per day.
+                Claude Sonnet 5 with web search is provided by this site.
               </p>
               <p className="ai-fine-print">
                 Your request, current text, timeline, and recent chat are sent
