@@ -205,22 +205,10 @@ h1 {
 }
 .instrument-top {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   padding: 5px 0 24px;
   font-size: 12px;
-}
-.sound-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #4b6054;
-}
-.sound-status i {
-  width: 6px;
-  height: 6px;
-  background: #65876c;
-  border-radius: 50%;
 }
 .keyboard-hint {
   display: flex;

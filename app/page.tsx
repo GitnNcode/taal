@@ -642,12 +642,26 @@ export default function Home() {
             </button>
           </div>
         )}
+        <section className="guide-strip" id="guide">
+          <div className="guide-symbol">
+            <Keyboard size={22} />
+          </div>
+          <div>
+            <h2>Your keyboard is your instrument.</h2>
+            <p>
+              Try <kbd>J</kbd> <kbd>F</kbd> <kbd>F</kbd> <kbd>D</kbd> for Dha,
+              Tin, Tin, Na. Then follow your ears.
+            </p>
+          </div>
+          <span className="guide-aside">
+            No right way to begin.
+            <br />
+            Just a first beat.
+          </span>
+        </section>
         <div className="workspace">
           <section className="instrument-panel" aria-label="Playable tabla">
             <div className="instrument-top">
-              <span className="sound-status">
-                <i /> {ready ? 'Ready when you are' : 'Loading tabla sounds…'}
-              </span>
               <span className="keyboard-hint">
                 <Keyboard size={16} /> Use your keyboard or tap
               </span>
@@ -919,23 +933,6 @@ export default function Home() {
             void toggleRecording();
           }}
         />
-        <section className="guide-strip" id="guide">
-          <div className="guide-symbol">
-            <Keyboard size={22} />
-          </div>
-          <div>
-            <h2>Your keyboard is your instrument.</h2>
-            <p>
-              Try <kbd>J</kbd> <kbd>F</kbd> <kbd>F</kbd> <kbd>D</kbd> — Dha,
-              Tin, Tin, Na. Then follow your ears.
-            </p>
-          </div>
-          <span className="guide-aside">
-            No right way to begin.
-            <br />
-            Just a first beat.
-          </span>
-        </section>
         <details className="guide-details">
           <summary>Playing tips & sound notes</summary>
           <p>
