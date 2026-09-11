@@ -110,7 +110,7 @@ export default function ComposerAssistant({
     return () => request.abort();
   }, []);
   const [target, setTarget] = useState<ComposerTarget>('text');
-  const [searchWeb, setSearchWeb] = useState(false);
+  const searchWeb = true;
   const [prompt, setPrompt] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState<'connecting' | 'composing' | null>(null);
@@ -230,15 +230,13 @@ export default function ComposerAssistant({
             script,
             bpm,
             target,
-            model: envModel,
-            searchWeb,
             messages,
           }),
         });
         if (!response.ok) {
           const failure = (await response.json()) as { error?: string };
           throw new Error(
-            failure.error || 'The local AI connection failed. Try again.',
+            failure.error || 'The hosted AI connection failed. Try again.',
           );
         }
         reply = parseComposerReply(await response.text());
@@ -347,52 +345,22 @@ export default function ComposerAssistant({
         <div className="ai-scroll" ref={conversation}>
           {useEnv && settings && (
             <div className="ai-connection">
-              <h3>Connected through .env</h3>
+              <h3>Hosted AI connection</h3>
               <p>
-                Your OpenRouter key stays on the local server. Requests use your
-                account’s credits.
+                Claude Sonnet 5 with web search is provided by this site. Each
+                visitor can send three messages per day.
               </p>
               <p className="ai-fine-print">
                 Your request, current text, timeline, and recent chat are sent
                 to OpenRouter when you send a message.
               </p>
-              <label htmlFor="ai-env-model">Model</label>
-              <input
-                id="ai-env-model"
-                list="openrouter-models"
-                value={modelInput}
-                onChange={(event) => setModelInput(event.target.value)}
-                disabled={!!busy}
-                spellCheck={false}
-              />
               <button
                 type="button"
                 className="primary-button"
-                disabled={
-                  !!busy ||
-                  !modelInput.trim() ||
-                  (!!models.length &&
-                    !models.some((item) => item.id === modelInput.trim()))
-                }
-                onClick={() => {
-                  const selected = modelInput.trim();
-                  setEnvModel(selected);
-                  setTurns([]);
-                  setProposalSnapshot('');
-                  setError('');
-                  setNotice(`Using ${selected}.`);
-                  setSettings(false);
-                }}
-              >
-                Use this model
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
                 disabled={!!busy}
-                onClick={() => setUseEnv(false)}
+                onClick={() => setSettings(false)}
               >
-                Use a different key
+                Done
               </button>
             </div>
           )}
@@ -657,12 +625,11 @@ export default function ComposerAssistant({
               <Switch
                 id="ai-web-search"
                 checked={searchWeb}
-                onCheckedChange={setSearchWeb}
-                disabled={!!busy}
+                disabled
               />
               <span>
                 Search the web
-                <small>Find existing material and include sources</small>
+                <small>Always enabled; sources are included when available</small>
               </span>
             </label>
             <label className="sr-only" htmlFor="ai-prompt">

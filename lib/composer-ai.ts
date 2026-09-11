@@ -12,7 +12,7 @@ import {
   type Composition,
 } from './tabla';
 
-export const DEFAULT_MODEL = 'google/gemini-3.8-flash';
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5';
 export type ComposerTarget = 'text' | 'timeline' | 'new';
 export type ComposerReply = {
   explanation: string;

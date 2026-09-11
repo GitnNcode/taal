@@ -40,7 +40,7 @@ const reply = {
     bpm: 600,
   },
 };
-assert.equal(DEFAULT_MODEL, 'google/gemini-3.8-flash');
+assert.equal(DEFAULT_MODEL, 'anthropic/claude-sonnet-5');
 assert.deepEqual(parseComposerReply(JSON.stringify(reply)), reply);
 assert.deepEqual(parseComposerReply('```json\n' + JSON.stringify(reply) + '\n```'), reply);
 assert.throws(() => parseComposerReply('Here is JSON: ' + JSON.stringify(reply)));
@@ -308,15 +308,35 @@ const routeJS = ts.transpileModule(routeSource, {
 const fakeEnv = { OPENROUTER_API_KEY: 'server-only-test-secret' };
 let upstream;
 let upstreamFailure;
+let rateLimitSuccess = true;
+let limitedIdentifier;
+class FakeRatelimit {
+  static fixedWindow(limit, window) {
+    assert.equal(limit, 3);
+    assert.equal(window, '1 d');
+    return { limit, window };
+  }
+  async limit(identifier) {
+    limitedIdentifier = identifier;
+    return { success: rateLimitSuccess };
+  }
+}
+class FakeRedis {}
 const routeContext = {
   exports: {},
   process: { env: fakeEnv },
+  crypto,
   URL,
   Response,
   TextDecoder,
+  TextEncoder,
   AbortSignal,
   require: (name) =>
-    name === '@/lib/tabla'
+    name === '@upstash/ratelimit'
+      ? { Ratelimit: FakeRatelimit }
+      : name === '@upstash/redis'
+        ? { Redis: FakeRedis }
+        : name === '@/lib/tabla'
       ? tabla
         : {
             DEFAULT_MODEL,
@@ -333,7 +353,12 @@ vm.runInNewContext(routeJS, routeContext);
 const { GET, POST } = routeContext.exports;
 assert.deepEqual(
   await GET(new Request('http://localhost:3000/api/composer')).json(),
-  { configured: true, model: DEFAULT_MODEL },
+  {
+    configured: true,
+    model: DEFAULT_MODEL,
+    searchWeb: true,
+    dailyMessageLimit: 3,
+  },
 );
 assert.equal(
   (await GET(new Request('https://example.com/api/composer')).json())
@@ -360,8 +385,14 @@ const post = (payload, origin = 'http://localhost:3000') =>
 assert.equal((await post(body, 'https://untrusted.example')).status, 403);
 assert.equal((await post(body, '')).status, 403);
 assert.equal((await post({ ...body, bpm: 601 })).status, 400);
-assert.equal((await post({ ...body, model: 'invalid model id' })).status, 400);
-assert.equal((await post({ ...body, searchWeb: 'yes' })).status, 400);
+const ignoredClientSettings = await post({
+  ...body,
+  model: 'invalid model id',
+  searchWeb: false,
+});
+assert.equal(ignoredClientSettings.status, 200);
+assert.equal(upstream.model, DEFAULT_MODEL);
+assert.equal(upstream.searchWeb, true);
 assert.equal(
   (
     await post({
@@ -380,7 +411,7 @@ assert.equal(valid.status, 200);
 const validText = await valid.text();
 assert.ok(!validText.includes(fakeEnv.OPENROUTER_API_KEY));
 assert.equal(upstream.apiKey, fakeEnv.OPENROUTER_API_KEY);
-assert.equal(upstream.model, body.model);
+assert.equal(upstream.model, DEFAULT_MODEL);
 assert.equal(upstream.searchWeb, true);
 assert.ok(upstream.system.includes('Web search is enabled'));
 assert.ok(upstream.system.includes('typedText'));
@@ -389,6 +420,33 @@ assert.match((await (await post(body)).json()).error, /needs credits/);
 upstreamFailure = new Error('private provider detail server-only-test-secret');
 assert.equal((await (await post(body)).json()).error, 'Could not reach OpenRouter. Check your connection and try again.');
 upstreamFailure = undefined;
+Object.assign(fakeEnv, {
+  UPSTASH_REDIS_REST_URL: 'https://redis.example',
+  UPSTASH_REDIS_REST_TOKEN: 'redis-token',
+  RATE_LIMIT_SECRET: 'rate-limit-secret',
+});
+assert.equal(
+  (await GET(new Request('https://taal.example/api/composer')).json())
+    .configured,
+  true,
+);
+const productionPost = () =>
+  POST(
+    new Request('https://taal.example/api/composer', {
+      method: 'POST',
+      headers: {
+        origin: 'https://taal.example',
+        'Content-Type': 'application/json',
+        'x-forwarded-for': '203.0.113.10',
+      },
+      body: JSON.stringify(body),
+    }),
+  );
+rateLimitSuccess = false;
+assert.equal((await productionPost()).status, 429);
+rateLimitSuccess = true;
+assert.equal((await productionPost()).status, 200);
+assert.match(limitedIdentifier, /^[a-f0-9]{64}$/);
 delete fakeEnv.OPENROUTER_API_KEY;
 assert.equal((await post(body)).status, 503);
 assert.equal(
@@ -397,5 +455,5 @@ assert.equal(
   false,
 );
 console.log(
-  'PASS: .env discovery, server-only key use, local/same-origin boundaries, bounded input, validation, and missing-key behavior.',
+  'PASS: hosted-key discovery, fixed model/search settings, local/same-origin boundaries, bounded input, validation, and missing-key behavior.',
 );
