@@ -1,4 +1,3 @@
-import { env } from 'cloudflare:workers';
 import {
   composerSystemPrompt,
   ComposerError,
@@ -19,11 +18,11 @@ function localRequest(request: Request) {
   );
 }
 function key() {
-  const value = (env as Record<string, unknown>).OPENROUTER_API_KEY;
+  const value = process.env.OPENROUTER_API_KEY;
   return typeof value === 'string' ? value.trim() : '';
 }
 function model() {
-  const value = (env as Record<string, unknown>).OPENROUTER_MODEL;
+  const value = process.env.OPENROUTER_MODEL;
   return typeof value === 'string' && value.trim()
     ? value.trim()
     : DEFAULT_MODEL;

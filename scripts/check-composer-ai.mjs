@@ -310,15 +310,14 @@ let upstream;
 let upstreamFailure;
 const routeContext = {
   exports: {},
+  process: { env: fakeEnv },
   URL,
   Response,
   TextDecoder,
   AbortSignal,
   require: (name) =>
-    name === 'cloudflare:workers'
-      ? { env: fakeEnv }
-      : name === '@/lib/tabla'
-        ? tabla
+    name === '@/lib/tabla'
+      ? tabla
         : {
             DEFAULT_MODEL,
             ComposerError,
