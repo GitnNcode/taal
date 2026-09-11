@@ -187,18 +187,9 @@ export default function Home() {
         if (!cancelled) fail(err);
       });
     setCanRecord(typeof MediaRecorder !== 'undefined');
-    const hide = () => {
-      if (document.hidden) {
-        if (playMode.current) setAudioTiming('Playback paused because this tab is hidden. Return here and press Play.');
-        stopLoop();
-        stopRecording();
-      }
-    };
-    document.addEventListener('visibilitychange', hide);
     return () => {
       cancelled = true;
       mounted.current = false;
-      document.removeEventListener('visibilitychange', hide);
       if (playbackFrame.current !== null)
         cancelAnimationFrame(playbackFrame.current);
       previewFrames.current.forEach(cancelAnimationFrame);
@@ -211,7 +202,7 @@ export default function Home() {
       if (recordObjectUrl.current) URL.revokeObjectURL(recordObjectUrl.current);
       engine.current?.dispose();
     };
-  }, [stopLoop, stopRecording]);
+  }, []);
   async function resetAudio() {
     if (pending.current || recordPending.current) return;
     stopLoop();
