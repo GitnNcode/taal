@@ -37,7 +37,11 @@ Use **Compose** to drag bols or explicit rests into the timeline and reorder pla
 
 Mouse dragging uses native HTML drag and drop. Touch and pen use pointer dragging. Keyboard users can select a palette bol, activate an empty beat, and use Earlier/Later controls. Editing stops playback; tempo can change while playing. The metronome stays on the beat grid independently of note duration, and the studio recorder captures composition playback.
 
-The latest draft saves to browser localStorage. Export/import JSON preserves the full composition; Undo retains the last 30 edits in the current tab. A new composition is reversible with Undo. Composition import validates the bol, timing, cycle alignment, and emphasis fields.
+The latest draft saves its name, beats, tempo, and unfinished bol text together in browser localStorage. Export/import JSON preserves the full composition; Undo retains the last 30 edits in the current tab. A new composition is reversible with Undo. Composition import validates the bol, timing, cycle alignment, and emphasis fields.
+
+Practice rhythms and compositions are rendered with `OfflineAudioContext` before playback and cached while editing. One native looping audio source plays the complete track; animation derives its position from that same track and the audio output timestamp. Background rendering preserves ringing tails across loop boundaries. Tempo and metronome changes replace the compiled track at the same musical position. A delayed animation frame catches up to the track without interrupting or rescheduling its sound. Browser/device output latency, particularly with wireless headphones, is separate from render time.
+
+Check compiled playback with `node --experimental-strip-types scripts/check-compiled-audio.mjs` and `node --experimental-strip-types scripts/check-high-tempo.mjs`. For actual browser waveform checks while the dev server runs, temporarily copy `scripts/check-compiled-browser.html` into `public/`, open that file on localhost, then remove the copy. The check renders silently and verifies the first attack, later beat placement, rests, exact loop length, and caching.
 
 ```sh
 node --experimental-strip-types scripts/check-composition.mjs
@@ -57,3 +61,25 @@ References used for the vocabulary and playback notes:
 - NYU Theory & Practice I: https://sites.google.com/nyu.edu/theoryandpractice1/course-content/unit-4-rhythm-meter/north-indian-taal — foundational articulations and Tirakita.
 
 Check the extended library with `node --experimental-strip-types scripts/check-bol-library.mjs`.
+
+## AI composition assistant
+
+The bottom-right **Ask AI** sparkle opens a composer assistant. Connect an OpenRouter API key; the default model is `google/gemini-3.8-flash`. Connection checks the key and the model's JSON-response support without generating tokens. A different supported OpenRouter model ID can be entered in Connection.
+
+Choose **Typed bols**, **Current timeline**, or **Something new**. The assistant receives the current text (including unapplied edits), timeline, tempo, cycle, bol library, phrase expansions, notation limits, and recent conversation. Requests go directly from the browser to OpenRouter and use the connected account's credits. Keys remain in page memory only; disconnect or reload to clear them. No server secret or environment variable is required.
+
+Proposals are checked by the composition parser before being shown. **Use in text box** preserves the timeline and offers **Undo text replacement**. **Apply composition** stops playback, loads the proposal and tempo, and keeps the previous composition, typed draft, and tempo in Undo. If the editor changes while a request is running, the old proposal cannot overwrite it; ask for an update. Requests support cancellation and timeouts, and failed requests preserve your prompt for retry.
+
+The bol text box grows and shrinks with text, including paste, AI proposals, responsive wrapping, and reopening its collapsed section.
+
+```sh
+node --experimental-strip-types scripts/check-composer-ai.mjs
+```
+
+This check covers response validation, prompt context, mocked OpenRouter requests/errors/cancellation, and textarea measurement behavior. It does not make a paid model call or substitute for browser interaction testing.
+
+### Local .env connection
+
+For automatic local connection, put `OPENROUTER_API_KEY=your-key` in the ignored `.env` file, then start/restart `npm run dev`. Optionally set `OPENROUTER_MODEL`; the default remains Gemini 3.8 Flash. Use `=`, not `:`, between the variable and its value. Refresh the page after adding the key.
+
+The assistant detects this connection without asking you to paste the key. Local requests go through `/api/composer`, which keeps the key on the server, validates the input, rebuilds the system prompt, and returns only the proposal. The shared-key route is limited to localhost and same-origin requests; it is not enabled for hosted/public access. Connection settings still offer the browser-key flow. The `.env` file is ignored by Git and must not be committed.

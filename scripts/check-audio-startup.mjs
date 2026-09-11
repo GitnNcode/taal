@@ -31,9 +31,27 @@ assert.equal(stalled.unlock(),undefined,'A timed-out startup does not permanentl
 stalled.closed=true;
 assert.throws(()=>stalled.unlock(),/closed/);
 
+// Browsers can close a context after sleep or an output-device change. Rebuild it
+// on the next gesture instead of reusing the permanently silent context.
+const originalWindow = globalThis.window;
+class ReplacementContext {
+  state = 'running'; currentTime = 0; destination = {};
+  createGain() { return { gain: { value: 0 }, connect() {} }; }
+  createDynamicsCompressor() { return { threshold: { value: 0 }, ratio: { value: 0 }, connect() {} }; }
+  createMediaStreamDestination() { return { stream: {} }; }
+}
+globalThis.window = { AudioContext: ReplacementContext };
+const externallyClosed = new TablaAudio();
+externallyClosed.context = { state: 'closed' };
+externallyClosed.loaded = true;
+externallyClosed.load = async () => { externallyClosed.loaded = true; };
+await externallyClosed.unlock();
+assert.ok(externallyClosed.context instanceof ReplacementContext);
+globalThis.window = originalWindow;
+
 // Future phrase voices are canceled on Stop; free-play voices are left alone.
 const voices=[];
-const param={value:0,setValueAtTime(){},exponentialRampToValueAtTime(){}};
+const param={value:0,setValueAtTime(){},exponentialRampToValueAtTime(){},linearRampToValueAtTime(){}};
 const audio=new TablaAudio();
 audio.master={};audio.buffers={te:{},ke:{}};
 audio.context={currentTime:1,createGain(){return {gain:{...param},connect(){},disconnect(){}};},createBufferSource(){const voice={buffer:null,connect(){},disconnect(){},start(time){this.time=time;},stop(){this.stopped=true;}};voices.push(voice);return voice;}};
@@ -43,4 +61,4 @@ audio.play('Te',1,false);
 audio.stopLoop();
 assert.ok(voices.slice(0,4).every(voice=>voice.stopped));
 assert.equal(voices[4].stopped,undefined);
-console.log('PASS: synchronous warm starts, shared cold startup, stalled startup timeout/retry, disposed context, and phrase cancellation.');
+console.log('PASS: warm/cold startup, timeout retry, externally closed-context rebuild, disposal, and phrase cancellation.');

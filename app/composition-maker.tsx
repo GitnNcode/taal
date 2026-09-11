@@ -1,6 +1,7 @@
 'use client';
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -23,6 +24,8 @@ import {
   Trash2,
   Undo2,
 } from 'lucide-react';
+import AutoTextarea from './auto-textarea';
+import ComposerAssistant from './composer-assistant';
 import { Slider } from '@/components/ui/slider';
 import {
   Select,
@@ -32,7 +35,6 @@ import {
   SelectItem,
 } from '@/components/ui/select';
 import {
-  STROKES,
   MIN_BPM,
   MAX_BPM,
   COMPOSITION_BOLS,
@@ -47,6 +49,7 @@ import {
   changeCompositionStep,
   resizeComposition,
   parseComposition,
+  parseCompositionDraft,
   parseBolScript,
   formatBolScript,
   type Composition,
@@ -67,6 +70,7 @@ export default function CompositionMaker({
   onPlay,
   onStop,
   onEdit,
+  onChange,
   onPreview,
   recording,
   onRecord,
@@ -79,6 +83,7 @@ export default function CompositionMaker({
   onPlay: (composition: Composition) => Promise<void>;
   onStop: () => void;
   onEdit: () => void;
+  onChange: (composition: Composition) => void;
   onPreview: (bol: string, emphasis?: number, units?: number) => void;
   recording: boolean;
   onRecord: () => void;
@@ -96,9 +101,12 @@ export default function CompositionMaker({
   const [bolSearch, setBolSearch] = useState('');
   const [script, setScript] = useState('');
   const [scriptError, setScriptError] = useState('');
+  const [previousText, setPreviousText] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [history, setHistory] = useState<Composition[]>([]);
+  const [history, setHistory] = useState<
+    { composition: Composition; bpm?: number; script?: string }[]
+  >([]);
   const [cycleInput, setCycleInput] = useState('16');
   const source = useRef<Source | null>(null);
   const touch = useRef<{
@@ -111,12 +119,22 @@ export default function CompositionMaker({
   const suppressClick = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const current = useRef(composition);
-  current.current = composition;
+  useEffect(() => {
+    if (composition) onChange(composition);
+  }, [composition, onChange]);
+  useLayoutEffect(() => {
+    current.current = composition;
+  }, [composition]);
   useEffect(() => {
     let initial = newComposition();
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) initial = parseComposition(JSON.parse(stored));
+      if (stored) {
+        const draft = parseCompositionDraft(JSON.parse(stored));
+        initial = draft.composition;
+        setBpm(draft.bpm);
+        setScript(draft.script);
+      }
     } catch {
       setNotice(
         'Your saved draft could not be opened. Start a new one or import a saved file.',
@@ -124,11 +142,11 @@ export default function CompositionMaker({
     }
     setComposition(initial);
     setCycleInput(String(initial.beatsPerCycle));
-  }, []);
-  useEffect(() => {
+  }, [setBpm]);
+  useLayoutEffect(() => {
     if (!composition) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(composition));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...composition, bpm, script }));
       setSaved(true);
     } catch {
       setSaved(false);
@@ -136,7 +154,7 @@ export default function CompositionMaker({
         'Browser storage is unavailable. Export your composition to keep it.',
       );
     }
-  }, [composition]);
+  }, [composition, bpm, script]);
   if (!composition)
     return (
       <section id="compose" className="composer">
@@ -158,11 +176,18 @@ export default function CompositionMaker({
       )?.id
     : null;
   const hasNotes = composition.steps.some((step) => step.bol !== null);
-  function edit(next: Composition, message = '') {
+  function edit(
+    next: Composition,
+    message = '',
+    restore?: { bpm: number; script: string },
+  ) {
     const previous = current.current;
     if (!previous || next === previous) return;
     onEdit();
-    setHistory((old) => [...old.slice(-29), previous]);
+    setHistory((old) => [
+      ...old.slice(-29),
+      { composition: previous, ...restore },
+    ]);
     current.current = next;
     setComposition(next);
     setCycleInput(String(next.beatsPerCycle));
@@ -403,9 +428,14 @@ export default function CompositionMaker({
               const previous = history.at(-1);
               if (previous) {
                 onEdit();
-                setComposition(previous);
-                current.current = previous;
-                setCycleInput(String(previous.beatsPerCycle));
+                setComposition(previous.composition);
+                current.current = previous.composition;
+                if (previous.bpm !== undefined) setBpm(previous.bpm);
+                if (previous.script !== undefined) {
+                  setScript(previous.script);
+                  setScriptError('');
+                }
+                setCycleInput(String(previous.composition.beatsPerCycle));
                 setHistory((old) => old.slice(0, -1));
                 setSelected(null);
                 setNotice('Last change undone.');
@@ -464,7 +494,7 @@ export default function CompositionMaker({
           Pause, or - for silence. Extra space is filled to complete your chosen
           cycle.
         </p>
-        <textarea
+        <AutoTextarea
           id="bol-script-input"
           rows={3}
           placeholder="Dha(2)[110], Dhin[70], Terekete(0.5)[90], Rest(2), Na"
@@ -506,6 +536,20 @@ export default function CompositionMaker({
           >
             Replace composition
           </button>
+          {previousText !== null && (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setScript(previousText);
+                setPreviousText(null);
+                setScriptError('');
+                setNotice('Previous typed draft restored.');
+              }}
+            >
+              <Undo2 size={15} />
+              Undo text replacement
+            </button>
+          )}
           <span>Copying to text does not change your timeline.</span>
         </div>
       </details>
@@ -759,7 +803,7 @@ export default function CompositionMaker({
               <p className="inspector-help bol-breakdown">
                 {bolDescription(chosen.bol)}
               </p>
-              <label className="inspector-label" id="duration-label">
+              <label className="inspector-label" id="duration-label" htmlFor="bol-duration">
                 Time before next bol
               </label>
               <Select
@@ -774,6 +818,7 @@ export default function CompositionMaker({
                 }}
               >
                 <SelectTrigger
+                  id="bol-duration"
                   className="taal-select"
                   aria-labelledby="duration-label"
                 >
@@ -794,7 +839,7 @@ export default function CompositionMaker({
                 added when needed.
               </p>
               <div className="emphasis-heading">
-                <label id="emphasis-label">Emphasis</label>
+                <span id="emphasis-label">Emphasis</span>
                 <strong>{Math.round(chosen.emphasis * 100)}%</strong>
               </div>
               <Slider
@@ -961,6 +1006,37 @@ export default function CompositionMaker({
         {notice ||
           'Phrases divide their duration between strokes. Additional articulations use approximate sample voicings; Kran uses Ke–Te–Na. Empty beats are silent.'}
       </p>
+      <ComposerAssistant
+        composition={composition}
+        script={script}
+        bpm={bpm}
+        onUseText={(text) => {
+          setPreviousText(script);
+          setScript(text);
+          setScriptError('');
+          const details = document
+            .getElementById('bol-script-input')
+            ?.closest('details');
+          if (details) details.open = true;
+          document
+            .getElementById('bol-script-input')
+            ?.scrollIntoView({ block: 'center' });
+          setNotice(
+            'AI proposal copied to the text box. Your timeline is unchanged.',
+          );
+        }}
+        onApply={(next, tempo, text) => {
+          edit(
+            next,
+            `AI composition applied at ${tempo} BPM with ${next.beatsPerCycle} beats per cycle. Undo restores your previous draft, cycle, and tempo.`,
+            { bpm, script },
+          );
+          setBpm(tempo);
+          setScript(text);
+          setScriptError('');
+          setSelected(null);
+        }}
+      />
       {ghost && (
         <div
           className="drag-ghost"

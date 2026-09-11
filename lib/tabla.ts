@@ -154,13 +154,24 @@ export function tempoSeconds(bpm: number) {
 }
 
 // Drive visuals from the sample frame at the output device, not the render-ahead clock.
+// Browsers disagree about what getOutputTimestamp() means: Chrome and Firefox
+// report the frame leaving the device, Safari reports the frame leaving the
+// renderer. Whichever estimate says the sound is further behind is the one that
+// accounts for more of the real hardware path, so take the earlier of the two.
 export function audibleContextTime(
   ctx: Pick<
     AudioContext,
     'currentTime' | 'state' | 'baseLatency' | 'outputLatency'
   > & { getOutputTimestamp?: () => AudioTimestamp },
+  now = performance.now(),
 ): number {
   if (ctx.state !== 'running') return -Infinity;
+  // Compressor look-ahead adds a fixed 6 ms.
+  const fromLatency =
+    ctx.currentTime -
+    Math.max(0, ctx.baseLatency || 0) -
+    Math.max(0, ctx.outputLatency || 0) -
+    0.006;
   if (typeof ctx.getOutputTimestamp === 'function') {
     const stamp = ctx.getOutputTimestamp();
     if (
@@ -169,16 +180,14 @@ export function audibleContextTime(
     ) {
       // A zero timestamp means output has not begun yet. Do not advance the playhead.
       if (stamp.performanceTime === 0) return -Infinity;
-      return Math.min(ctx.currentTime, stamp.contextTime!) - 0.006;
+      // The timestamp describes a past output frame. Project it onto this
+      // display frame, but stop extrapolating if the device stops reporting.
+      const elapsed = Math.max(0, Math.min(0.05, (now - stamp.performanceTime!) / 1000));
+      const fromStamp = Math.min(ctx.currentTime, stamp.contextTime! + elapsed) - 0.006;
+      return Math.min(fromStamp, fromLatency);
     }
   }
-  // Older browsers: use their latency estimates, including compressor look-ahead.
-  return (
-    ctx.currentTime -
-    Math.max(0, ctx.baseLatency || 0) -
-    Math.max(0, ctx.outputLatency || 0) -
-    0.006
-  );
+  return fromLatency;
 }
 
 export class TablaAudio {
@@ -191,7 +200,20 @@ export class TablaAudio {
   private resuming: Promise<void> | null = null;
   private voices = new Map<AudioScheduledSourceNode, boolean>();
   private closed = false;
+  private compiled = new Map<string, Promise<CompiledTrack>>();
+  private discardExternallyClosedContext() {
+    if (this.context?.state !== 'closed') return;
+    this.context = null;
+    this.master = null;
+    this.destination = null;
+    this.buffers = {};
+    this.loading = null;
+    this.loaded = false;
+    this.resuming = null;
+    this.voices.clear();
+  }
   init() {
+    this.discardExternallyClosedContext();
     if (!this.context) {
       const Constructor =
         window.AudioContext ||
@@ -230,7 +252,7 @@ export class TablaAudio {
           const buffer = await ctx.decodeAudioData(
             await response.arrayBuffer(),
           );
-          if (this.closed) return;
+          if (this.closed || this.context !== ctx) return;
           // Normalize the recorded strokes so short closed bols remain audible.
           let peak = 0;
           for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
@@ -252,10 +274,10 @@ export class TablaAudio {
         }),
       )
         .then(() => {
-          this.loaded = !this.closed;
+          if (this.context === ctx) this.loaded = !this.closed;
         })
         .catch((error) => {
-          this.loading = null;
+          if (this.context === ctx) this.loading = null;
           throw error;
         });
     return this.loading;
@@ -279,7 +301,7 @@ export class TablaAudio {
           () =>
             reject(
               new Error(
-                'Audio did not start. Tap Play again; if it persists, reload the page and check your sound output.',
+                'Audio did not start. Tap Play again to reconnect it.',
               ),
             ),
           3000,
@@ -315,11 +337,20 @@ export class TablaAudio {
     durationSeconds = 2 / 3,
   ) {
     if (!this.context || !this.master || this.closed) return;
-    const ctx = this.context;
+    this.renderBol(this.context, this.master, bol, time, velocity, durationSeconds, loop);
+  }
+  private renderBol(ctx: BaseAudioContext, output: AudioNode, bol: string,
+    time: number, velocity: number, durationSeconds: number, loop: boolean | null) {
     const when = Math.max(time, ctx.currentTime);
     if (bol in PHRASES) {
-      for (const hit of bolHits(bol, durationSeconds))
-        this.play(hit.bol, when + hit.offset, loop, velocity);
+      const hits = bolHits(bol, durationSeconds);
+      for (const [index, hit] of hits.entries()) {
+        // Te and Re share a recording. A lighter Re and balanced Ke keep
+        // Terekete from sounding like four equally accented attacks.
+        const accent = bol === 'Terekete' ? [1, 0.6, 0.75, 0.9][index] : 1;
+        const end = hits[index + 1]?.offset ?? Math.max(0.001, durationSeconds);
+        this.renderBol(ctx, output, hit.bol, when + hit.offset, velocity * accent, end - hit.offset, loop);
+      }
       return;
     }
     for (const part of PARTS[bol] || []) {
@@ -337,8 +368,8 @@ export class TablaAudio {
             when + 0.95 / (1 + i * 0.4),
           );
           osc.connect(gain);
-          gain.connect(this.master!);
-          this.track(osc, loop, gain);
+          gain.connect(output);
+          if (loop !== null) this.track(osc, loop, gain);
           osc.start(when);
           osc.stop(when + 1.05);
         });
@@ -348,24 +379,93 @@ export class TablaAudio {
         source.buffer = this.buffers[part];
         gain.gain.value = velocity * 0.75;
         source.connect(gain);
-        gain.connect(this.master);
-        this.track(source, loop, gain);
-        source.start(when);
+        gain.connect(output);
+        if (loop !== null) this.track(source, loop, gain);
+        if (part === 'te' || part === 'ke') {
+          // Closed strokes must release inside their slot, including the last
+          // stroke of a phrase. Fade rather than cut the waveform abruptly.
+          const span = Math.max(0.001, durationSeconds);
+          const end = when + span;
+          gain.gain.setValueAtTime(velocity * 0.75, when);
+          gain.gain.setValueAtTime(velocity * 0.75, end - Math.min(0.005, span / 4));
+          gain.gain.linearRampToValueAtTime(0, end);
+          source.start(when, 0, span);
+        } else source.start(when);
       }
     }
   }
   click(time: number, accent: boolean) {
     if (!this.context || !this.master) return;
-    const osc = this.context.createOscillator();
-    const gain = this.context.createGain();
+    this.renderClick(this.context, this.master, time, accent, true);
+  }
+  private renderClick(ctx: BaseAudioContext, output: AudioNode, time: number, accent: boolean, loop: boolean | null) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
     osc.frequency.value = accent ? 1400 : 950;
     gain.gain.setValueAtTime(0.085, time);
     gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.035);
     osc.connect(gain);
-    gain.connect(this.master);
-    this.track(osc, true, gain);
+    gain.connect(output);
+    if (loop !== null) this.track(osc, loop, gain);
     osc.start(time);
     osc.stop(time + 0.045);
+  }
+  compile(composition: Composition, bpm: number, metronome: boolean): Promise<CompiledTrack> {
+    const key = JSON.stringify([bpm, metronome, composition.beatsPerCycle,
+      composition.steps.map(({ bol, units, emphasis }) => [bol, units, emphasis])]);
+    const cached = this.compiled.get(key);
+    if (cached) return cached;
+    const rendering = this.renderTrack(composition, bpm, metronome);
+    this.compiled.set(key, rendering);
+    // Keep the current composition and practice rhythm, not every edit.
+    if (this.compiled.size > 2) this.compiled.delete(this.compiled.keys().next().value!);
+    void rendering.catch(() => { if (this.compiled.get(key) === rendering) this.compiled.delete(key); });
+    return rendering;
+  }
+  private async renderTrack(composition: Composition, bpm: number, metronome: boolean): Promise<CompiledTrack> {
+    await this.load();
+    if (this.closed) throw new Error('Audio restarted. Tap Play again.');
+    const units = compositionUnits(composition.steps);
+    const sampleRate = this.context!.sampleRate;
+    const frames = Math.max(1, Math.round(units * tempoSeconds(bpm) / 4 * sampleRate));
+    const duration = frames / sampleRate;
+    const secondsPerUnit = duration / units;
+    // Render enough repeats for all ringing tails to reach steady state. The
+    // first pass starts clean; the final pass is the seamless native loop.
+    const tail = Math.max(1.05, ...Object.values(this.buffers).map(buffer => buffer.duration));
+    const repeats = Math.ceil(tail / duration) + 1;
+    const offline = new OfflineAudioContext(1, frames * repeats, sampleRate);
+    const events = compositionTimeline(composition);
+    const hits = events.flatMap(event => bolHits(event.bol ?? 'Rest', event.units * secondsPerUnit)
+      .map(hit => ({ bol: hit.bol, time: event.start * secondsPerUnit + hit.offset })));
+    for (let cycle = 0; cycle < repeats; cycle++) {
+      const origin = cycle * duration;
+      for (const event of events) {
+        if (event.bol && event.bol !== 'Rest')
+          this.renderBol(offline, offline.destination, event.bol,
+            origin + event.start * secondsPerUnit, event.emphasis,
+            event.units * secondsPerUnit, null);
+      }
+      if (metronome) for (let unit = 0; unit < units; unit += 4)
+        this.renderClick(offline, offline.destination, origin + unit * secondsPerUnit,
+          unit % (composition.beatsPerCycle * 4) === 0, null);
+    }
+    const buffer = await offline.startRendering();
+    return { buffer, units, secondsPerUnit, duration, loopStart: (repeats - 1) * duration, hits };
+  }
+  startCompiled(track: CompiledTrack, when: number, offsetUnits = 0): AudioBufferSourceNode {
+    if (!this.context || !this.master || this.closed) throw new Error('Audio is not ready.');
+    const source = this.context.createBufferSource();
+    const gain = this.context.createGain();
+    source.buffer = track.buffer;
+    source.loop = true;
+    source.loopStart = track.loopStart;
+    source.loopEnd = track.buffer.duration;
+    source.connect(gain);
+    gain.connect(this.master);
+    this.track(source, true, gain);
+    source.start(when, (offsetUnits % track.units) * track.secondsPerUnit);
+    return source;
   }
   stopLoop() {
     for (const [source, loop] of this.voices)
@@ -378,6 +478,7 @@ export class TablaAudio {
   }
   dispose() {
     this.closed = true;
+    this.compiled.clear();
     for (const source of this.voices.keys()) {
       try {
         source.stop();
@@ -386,6 +487,28 @@ export class TablaAudio {
     this.voices.clear();
     if (this.context) void this.context.close();
   }
+}
+
+export type CompiledTrack = {
+  buffer: AudioBuffer;
+  units: number;
+  secondsPerUnit: number;
+  duration: number;
+  loopStart: number;
+  hits: { bol: string; time: number }[];
+};
+export type TrackPlayback = {
+  track: CompiledTrack;
+  source: AudioBufferSourceNode;
+  when: number;
+  offsetUnits: number;
+};
+export function trackPosition(playback: TrackPlayback, time: number) {
+  return playback.offsetUnits + Math.max(0, time - playback.when) / playback.track.secondsPerUnit;
+}
+export function practiceComposition(taal: Taal): Composition {
+  return { version: 1, name: TAALS[taal].name, beatsPerCycle: TAALS[taal].beats.length,
+    steps: TAALS[taal].beats.map((bol, index) => ({ id: String(index), bol: bol as Bol, units: 4, emphasis: index === 0 ? 0.85 : 0.68 })) };
 }
 
 // Composition timing uses quarter-beat units so fractional durations remain exact.
@@ -640,4 +763,15 @@ export function parseComposition(value: unknown): Composition {
       emphasis: step.emphasis,
     })),
   };
+}
+
+// Keep the v1 composition shape so existing drafts and exports still open.
+export function parseCompositionDraft(value: unknown) {
+  const composition = parseComposition(value);
+  const data = value as { bpm?: unknown; script?: unknown };
+  const bpm = typeof data.bpm === 'number' && Number.isInteger(data.bpm) &&
+    data.bpm >= MIN_BPM && data.bpm <= MAX_BPM ? data.bpm : 90;
+  const script = typeof data.script === 'string' && data.script.length <= 100_000
+    ? data.script : formatBolScript(composition.steps);
+  return { composition, bpm, script };
 }

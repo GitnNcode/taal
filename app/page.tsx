@@ -1,20 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  PARTS,
   STROKES,
   MIN_BPM,
   MAX_BPM,
   TAALS,
   TablaAudio,
-  nextBeat,
   tempoSeconds,
   type Taal,
   type Composition,
-  compositionTimeline,
-  compositionUnits,
+  practiceComposition,
+  trackPosition,
+  type TrackPlayback,
   audibleContextTime,
+  bolHits,
+  PARTS,
 } from '@/lib/tabla';
 import {
   AudioLines,
@@ -65,12 +66,15 @@ export default function Home() {
   const [canRecord, setCanRecord] = useState(true);
   const engine = useRef<TablaAudio | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
-  const scheduler = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playback = useRef<TrackPlayback[]>([]);
+  const [draftComposition, setDraftComposition] = useState<Composition | null>(null);
   const playbackFrame = useRef<number | null>(null);
-  const finishStartup = useRef<(() => void) | null>(null);
   const flashes = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const config = useRef({ bpm, taal, metronome });
-  config.current = { bpm, taal, metronome };
+  const previewFrames = useRef(new Set<number>());
+  const config = useRef({ bpm, taal, metronome, volume });
+  useLayoutEffect(() => {
+    config.current = { bpm, taal, metronome, volume };
+  }, [bpm, taal, metronome, volume]);
   const pending = useRef(false);
   const recordPending = useRef(false);
   const recordingGeneration = useRef(0);
@@ -94,7 +98,9 @@ export default function Home() {
             ? 'Ke'
             : bol === 'Dhi'
               ? 'Dhin'
-              : bol;
+              : STROKES.some((stroke) => stroke.bol === bol)
+                ? bol
+                : STROKES.find((stroke) => PARTS[stroke.bol]?.[0] === PARTS[bol]?.[0])?.bol ?? bol;
     const previous = flashes.current.get(canonical);
     if (previous) clearTimeout(previous);
     setActive((old) => [...new Set([...old, canonical])]);
@@ -106,18 +112,38 @@ export default function Home() {
       }, durationMs),
     );
   }, []);
+  const flashWhenAudible = useCallback((audio: TablaAudio, bol: string, when: number, duration: number) => {
+    const hits = bolHits(bol, duration);
+    const deadline = performance.now() + (duration + 8) * 1000;
+    let frame = 0;
+    const drawPreview = () => {
+      previewFrames.current.delete(frame);
+      if (!mounted.current || engine.current !== audio || performance.now() > deadline) return;
+      const outputTime = audibleContextTime(audio.context!);
+      while (hits.length && when + hits[0].offset <= outputTime) {
+        const hit = hits.shift()!;
+        if (outputTime - when - hit.offset < 0.05)
+          flash(hit.bol, Math.min(150, duration * 200));
+      }
+      if (hits.length) {
+        frame = requestAnimationFrame(drawPreview);
+        previewFrames.current.add(frame);
+      }
+    };
+    drawPreview();
+  }, [flash]);
   const stopLoop = useCallback(() => {
     playbackGeneration.current += 1;
     playMode.current = null;
     setCompositionPlaying(false);
     setCompositionPosition(-1);
-    if (scheduler.current) clearInterval(scheduler.current);
-    scheduler.current = null;
+    playback.current = [];
     if (playbackFrame.current !== null)
       cancelAnimationFrame(playbackFrame.current);
     playbackFrame.current = null;
-    finishStartup.current?.();
-    finishStartup.current = null;
+    flashes.current.forEach(clearTimeout);
+    flashes.current.clear();
+    setActive([]);
     setBusy(false);
     engine.current?.stopLoop();
     setPlaying(false);
@@ -127,6 +153,25 @@ export default function Home() {
     recordingGeneration.current += 1;
     if (recorder.current?.state === 'recording') recorder.current.stop();
     setRecording(false);
+  }, []);
+  const unlockAudio = useCallback(async () => {
+    const audio = engine.current;
+    if (!audio) throw new Error('Audio is not ready yet. Tap again to retry.');
+    try {
+      const unlocking = audio.unlock();
+      if (unlocking) await unlocking;
+      if (!mounted.current || engine.current !== audio)
+        throw new Error('Audio restarted. Tap again to play.');
+      audio.volume(config.current.volume);
+      return audio;
+    } catch (error) {
+      if (mounted.current && engine.current === audio) {
+        audio.dispose();
+        engine.current = new TablaAudio();
+        setReady(false);
+      }
+      throw error;
+    }
   }, []);
   useEffect(() => {
     mounted.current = true;
@@ -144,6 +189,7 @@ export default function Home() {
     setCanRecord(typeof MediaRecorder !== 'undefined');
     const hide = () => {
       if (document.hidden) {
+        if (playMode.current) setAudioTiming('Playback paused because this tab is hidden. Return here and press Play.');
         stopLoop();
         stopRecording();
       }
@@ -153,10 +199,10 @@ export default function Home() {
       cancelled = true;
       mounted.current = false;
       document.removeEventListener('visibilitychange', hide);
-      if (scheduler.current) clearInterval(scheduler.current);
       if (playbackFrame.current !== null)
         cancelAnimationFrame(playbackFrame.current);
-      finishStartup.current?.();
+      previewFrames.current.forEach(cancelAnimationFrame);
+      previewFrames.current.clear();
       flashes.current.forEach(clearTimeout);
       if (recorder.current?.state === 'recording') {
         recorder.current.onstop = null;
@@ -184,8 +230,9 @@ export default function Home() {
       if (unlocking) await unlocking;
       if (!mounted.current || engine.current !== audio) return;
       setReady(true);
-      audio.play('Dha');
-      flash('Dha');
+      const when = audio.context!.currentTime + 0.005;
+      audio.play('Dha', when);
+      flashWhenAudible(audio, 'Dha', when, 2 / 3);
       setAudioTiming('Audio connection reset; test Dha played');
     } catch (err) {
       if (mounted.current && engine.current === audio) fail(err);
@@ -213,28 +260,62 @@ export default function Home() {
     async (bol: string, emphasis = 1, units = 4) => {
       if (!engine.current) return;
       try {
-        const unlock = engine.current.unlock();
-        if (unlock) await unlock;
+        const audio = await unlockAudio();
         if (!mounted.current) return;
         setReady(true);
         setError('');
-        engine.current.play(
+        const when = audio.context!.currentTime + 0.005;
+        const duration = (tempoSeconds(config.current.bpm) * units) / 4;
+        audio.play(
           bol,
-          undefined,
+          when,
           false,
           emphasis,
-          (tempoSeconds(config.current.bpm) * units) / 4,
+          duration,
         );
-        flash(bol);
+        flashWhenAudible(audio, bol, when, duration);
       } catch (err) {
         fail(err);
       }
     },
-    [flash],
+    [flashWhenAudible, unlockAudio],
   );
+  // Prepare both play modes while editing. Live tempo changes swap compiled
+  // tracks at one shared sample time, preserving the musical position.
+  useEffect(() => {
+    const audio = engine.current;
+    if (!ready || !audio) return;
+    let cancelled = false;
+    const generation = playbackGeneration.current;
+    const timer = setTimeout(() => {
+      const practice = practiceComposition(taal);
+      const activeComposition = playMode.current === 'composition' ? draftComposition : practice;
+      const prepare = async () => {
+        try {
+          const track = await audio.compile(activeComposition ?? practice, bpm, metronome);
+          if (cancelled || engine.current !== audio || generation !== playbackGeneration.current) return;
+          const previous = playback.current.at(-1);
+          if (previous && previous.track !== track) {
+            const when = audio.context!.currentTime + 0.01;
+            const offsetUnits = trackPosition(previous, when) % track.units;
+            const source = audio.startCompiled(track, when, offsetUnits);
+            previous.source.stop(when);
+            playback.current.push({ track, source, when, offsetUnits });
+          }
+          if (draftComposition && activeComposition !== draftComposition)
+            await audio.compile(draftComposition, bpm, metronome);
+        } catch (err) {
+          if (!cancelled && playback.current.length) fail(err);
+        }
+      };
+      void prepare();
+    }, 120);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [ready, draftComposition, bpm, metronome, taal]);
+
   async function toggleLoop(composition?: Composition) {
     const mode = composition ? 'composition' : 'taal';
-    if (scheduler.current) {
+    if (playMode.current) {
       const sameMode = playMode.current === mode;
       stopLoop();
       if (sameMode) return;
@@ -243,123 +324,92 @@ export default function Home() {
     const requestedAt = performance.now();
     const generation = ++playbackGeneration.current;
     pending.current = true;
+    playMode.current = mode;
     setBusy(true);
+    setAudioTiming('Preparing the audio track…');
     try {
-      const unlock = engine.current.unlock();
-      if (unlock) await unlock;
+      const audio = await unlockAudio();
+      let cfg = config.current;
+      let track = await audio.compile(composition ?? practiceComposition(cfg.taal), cfg.bpm, cfg.metronome);
+      while (generation === playbackGeneration.current &&
+        (cfg.bpm !== config.current.bpm || cfg.metronome !== config.current.metronome || cfg.taal !== config.current.taal)) {
+        cfg = config.current;
+        track = await audio.compile(composition ?? practiceComposition(cfg.taal), cfg.bpm, cfg.metronome);
+      }
       if (!mounted.current || generation !== playbackGeneration.current) return;
       setReady(true);
       setError('');
-      const events = composition
-        ? new Map(
-            compositionTimeline(composition).map((step) => [step.start, step]),
-          )
-        : null;
-      const totalUnits = composition ? compositionUnits(composition.steps) : 0;
-      let unit = 0;
-      let when = engine.current.context!.currentTime + 0.01;
-      const visualQueue: {
-        time: number;
-        unit: number;
-        beatIndex: number;
-        bol: string | null | undefined;
-      }[] = [];
-      setAudioTiming('Waiting for the audio output to reach the first beat…');
-      const tick = () => {
-        const audio = engine.current!;
-        const now = audio.context!.currentTime;
-        if (when < now - 0.15) when = now + 0.02;
-        while (when < now + 0.1) {
-          const cfg = config.current;
-          const sequence = TAALS[cfg.taal];
-          const count = composition ? totalUnits : sequence.beats.length * 4;
-          unit %= count;
-          const current = unit;
-          const beatIndex = Math.floor(unit / 4);
-          const event = events?.get(unit);
-          const bol = composition
-            ? event?.bol
-            : unit % 4 === 0
-              ? sequence.beats[beatIndex]
-              : null;
-          const velocity = composition
-            ? (event?.emphasis ?? 0.8)
-            : beatIndex === 0
-              ? 0.85
-              : 0.68;
-          if (bol && bol !== 'Rest')
-            audio.play(
-              bol,
-              when,
-              true,
-              velocity,
-              (tempoSeconds(cfg.bpm) * (event?.units ?? 4)) / 4,
-            );
-          const cycleLength = composition
-            ? composition.beatsPerCycle
-            : sequence.beats.length;
-          if (cfg.metronome && unit % 4 === 0)
-            audio.click(when, beatIndex % cycleLength === 0);
-          visualQueue.push({ time: when, unit: current, beatIndex, bol });
-          when += tempoSeconds(cfg.bpm) / 4;
-          unit = nextBeat(unit, count);
+      const when = audio.context!.currentTime + 0.005;
+      const source = audio.startCompiled(track, when);
+      playback.current = [{ track, source, when, offsetUnits: 0 }];
+      const preparedMs = Math.round(performance.now() - requestedAt);
+      setAudioTiming(`Track ready in ${preparedMs} ms; waiting for its first audio frame…`);
+      let began = false;
+      let lastPosition = -1;
+      let lastOutputTime = -Infinity;
+      let lastProgressAt = performance.now();
+      let lastDiagnosticAt = 0;
+      let lastHit = '';
+      const draw = () => {
+        if (!mounted.current || engine.current !== audio || generation !== playbackGeneration.current) return;
+        const outputTime = audibleContextTime(audio.context!);
+        if (!began && performance.now() - lastDiagnosticAt > 500) {
+          lastDiagnosticAt = performance.now();
+          setAudioTiming(`Track ready in ${preparedMs} ms; audio ${audio.context!.state}, render ${audio.context!.currentTime.toFixed(3)} s, output ${outputTime.toFixed(3)} s, start ${when.toFixed(3)} s`);
         }
-      };
-      playMode.current = mode;
-      tick();
-      scheduler.current = setInterval(tick, 25);
-      await new Promise<void>((resolve) => {
-        finishStartup.current = resolve;
-        let began = false;
-        const draw = () => {
-          if (!mounted.current || generation !== playbackGeneration.current) {
-            resolve();
-            return;
+        if (outputTime > lastOutputTime) {
+          lastProgressAt = performance.now();
+          lastOutputTime = outputTime;
+        }
+        // Keep the old timing until the replacement track reaches the speaker.
+        while (playback.current.length > 1 && playback.current[1].when <= outputTime)
+          playback.current.shift();
+        const current = playback.current[0];
+        if (current && outputTime >= current.when) {
+          const absolutePosition = trackPosition(current, outputTime);
+          const position = Math.floor(absolutePosition) % current.track.units;
+          if (!began) {
+            began = true;
+            setBusy(false);
+            setPlaying(mode === 'taal');
+            setCompositionPlaying(mode === 'composition');
+            setAudioTiming(`Compiled track: ${preparedMs} ms preparation, ${Math.round(performance.now() - requestedAt)} ms to audio output; device latency ${Math.round(((audio.context!.baseLatency || 0) + (audio.context!.outputLatency || 0)) * 1000)} ms`);
           }
-          const outputTime = audibleContextTime(engine.current!.context!);
-          let latest: (typeof visualQueue)[number] | undefined;
-          while (visualQueue.length && visualQueue[0].time <= outputTime) {
-            latest = visualQueue.shift()!;
-            // A frame may span several subdivisions; keep every due bol flash.
-            if (latest.bol && latest.bol !== 'Rest')
-              flash(latest.bol, Math.min(150, tempoSeconds(config.current.bpm) * 200));
+          if (position !== lastPosition) {
+            lastPosition = position;
+            if (composition) setCompositionPosition(position);
+            else setBeat(Math.floor(position / 4));
           }
-          if (latest) {
-            if (!began) {
-              began = true;
-              setAudioTiming(
-                `${Math.round(performance.now() - requestedAt)} ms until the browser output clock reached the first beat`,
-              );
-              setPlaying(mode === 'taal');
-              setCompositionPlaying(mode === 'composition');
-              finishStartup.current = null;
-              resolve();
-            }
-            if (composition) setCompositionPosition(latest.unit);
-            else setBeat(latest.beatIndex);
+          const cycle = Math.floor(absolutePosition / current.track.units);
+          const withinCycle = (absolutePosition % current.track.units) * current.track.secondsPerUnit;
+          const hitIndex = current.track.hits.findLastIndex(hit => hit.time <= withinCycle);
+          const hit = current.track.hits[hitIndex];
+          const hitId = `${current.when}:${cycle}:${hitIndex}`;
+          if (hit && hitId !== lastHit && withinCycle - hit.time < 0.05) {
+            lastHit = hitId;
+            flash(hit.bol, Math.min(150, current.track.secondsPerUnit * 800));
           }
-          if (!began && performance.now() - requestedAt > 8000) {
-            fail(
-              new Error(
-                'The audio output is not advancing. Check your sound output, then try Play again.',
-              ),
-            );
-            stopLoop();
-            return;
-          }
-          playbackFrame.current = requestAnimationFrame(draw);
-        };
+        }
+        if (performance.now() - lastProgressAt > 3000) {
+          fail(new Error('The audio device paused. Tap Play to reconnect.'));
+          stopLoop();
+          stopRecording();
+          return;
+        }
         playbackFrame.current = requestAnimationFrame(draw);
-      });
+      };
+      playbackFrame.current = requestAnimationFrame(draw);
     } catch (err) {
-      fail(err);
+      if (generation === playbackGeneration.current) { fail(err); stopLoop(); }
     } finally {
       pending.current = false;
-      setBusy(false);
+      if (generation === playbackGeneration.current && !playback.current.length) setBusy(false);
     }
   }
   const toggleLoopRef = useRef(toggleLoop);
-  toggleLoopRef.current = toggleLoop;
+  useLayoutEffect(() => {
+    toggleLoopRef.current = toggleLoop;
+  });
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
@@ -400,8 +450,7 @@ export default function Home() {
     recordPending.current = true;
     const generation = ++recordingGeneration.current;
     try {
-      const unlock = engine.current.unlock();
-      if (unlock) await unlock;
+      const audio = await unlockAudio();
       if (!mounted.current || generation !== recordingGeneration.current)
         return;
       const mime = [
@@ -410,7 +459,7 @@ export default function Home() {
         'audio/ogg;codecs=opus',
       ].find((type) => MediaRecorder.isTypeSupported(type));
       const rec = new MediaRecorder(
-        engine.current.destination!.stream,
+        audio.destination!.stream,
         mime ? { mimeType: mime } : undefined,
       );
       const chunks: Blob[] = [];
@@ -701,7 +750,7 @@ export default function Home() {
               <p className="panel-description">
                 A steady rhythm to find your flow.
               </p>
-              <label className="field-label" id="taal-label">
+              <label className="field-label" id="taal-label" htmlFor="taal-select">
                 Choose a taal
               </label>
               <Select
@@ -714,6 +763,7 @@ export default function Home() {
                 }}
               >
                 <SelectTrigger
+                  id="taal-select"
                   className="taal-select"
                   aria-labelledby="taal-label"
                 >
@@ -728,7 +778,7 @@ export default function Home() {
                 </SelectContent>
               </Select>
               <div className="tempo-heading">
-                <label>Tempo</label>
+                <span>Tempo</span>
                 <div className="tempo-number">
                   <button
                     aria-label="Slower"
@@ -869,6 +919,7 @@ export default function Home() {
           onPlay={(composition) => toggleLoop(composition)}
           onStop={stopLoop}
           onEdit={stopLoop}
+          onChange={setDraftComposition}
           onPreview={(bol, emphasis, units) => {
             void strike(bol, emphasis, units);
           }}
@@ -898,8 +949,8 @@ export default function Home() {
           <summary>Playing tips & sound notes</summary>
           <p>
             <strong>Audio timing:</strong> <output>{audioTiming}</output>.
-            Playback highlights follow the browser’s audio output clock. Older
-            browsers use their reported latency estimate.
+            Loops are compiled before playback. Highlights follow the position in that track using the browser’s audio output clock and its reported
+            device latency, whichever accounts for more delay.
           </p>
           <p>
             Use A, S, D, F, G, H, J, and K to play the labeled strokes. You can

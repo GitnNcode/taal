@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><title>Compiled audio check</title>
+<pre id="result">Checking rendered audio…</pre>
+<script type="module">
+import { TablaAudio } from '/lib/tabla.ts';
+const audio = new TablaAudio();
+const results = [];
+const assert = (value, message) => { if (!value) throw new Error(message); };
+try {
+  for (const bpm of [90, 600]) {
+    const composition = {version:1,name:'Waveform check',beatsPerCycle:4,
+      steps:['Te','Rest','Ke','Rest'].map((bol,i)=>({id:String(i),bol,units:4,emphasis:.8}))};
+    const started = performance.now();
+    const track = await audio.compile(composition,bpm,false);
+    const data = track.buffer.getChannelData(0);
+    const rate = track.buffer.sampleRate;
+    const peak = (start, length) => {
+      let value = 0;
+      for(let i=Math.round(start*rate);i<Math.min(data.length,Math.round((start+length)*rate));i++) value=Math.max(value,Math.abs(data[i]));
+      return value;
+    };
+    const onset = data.findIndex(value=>Math.abs(value)>.01)/rate;
+    assert(onset>=0 && onset<.01, 'Leading silence in compiled audio');
+    assert(peak(0,.04)>.2, 'First Te is missing');
+    const second = 8*track.secondsPerUnit;
+    assert(peak(second,.04)>.2, 'Ke is not on its assigned beat');
+    assert(peak(.06,Math.min(.04, second-.06))<.02,'Closed stroke is spilling into silence');
+    assert(Math.abs(track.buffer.duration-track.loopStart-track.duration)<1/rate,'Loop length mismatch');
+    assert(peak(track.loopStart,.04)>.2,'Seamless repeat lost its first stroke');
+    const cachedAt=performance.now();
+    assert(await audio.compile(composition,bpm,false)===track,'Cache miss');
+    results.push({bpm,renderMs:Math.round(cachedAt-started),cachedMs:Math.round(performance.now()-cachedAt),firstSoundMs:Math.round(onset*1000),duration:track.duration});
+  }
+  document.querySelector('#result').textContent='PASS: actual OfflineAudioContext waveforms, first attack, later beat placement, silent rests, exact repeat, cache.\n'+JSON.stringify(results,null,2);
+} catch(error) { document.querySelector('#result').textContent='FAIL: '+error.stack; }
+finally { audio.dispose(); }
+</script>
