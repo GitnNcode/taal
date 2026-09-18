@@ -176,6 +176,37 @@ try {
   );
   assert.equal(JSON.parse(captured.body).tools[0].parameters.engine, 'exa');
   assert.equal(JSON.parse(captured.body).tools[0].parameters.max_uses, 1);
+  const keharwa = {
+    explanation: 'A simple cycle followed by a livelier variation.',
+    composition: {
+      name: 'Two cycles of Keharwa',
+      script: 'Dha, Ge, Na, Ti, Na, Ka, Dhi, Na, Dha, Ge, Na, Tirakita, Na, Ka, Dhi, Na',
+      beatsPerCycle: 8,
+      bpm: 90,
+    },
+  };
+  const invalid = { ...keharwa, composition: { ...keharwa.composition, script: 'UnsupportedBol' } };
+  const correctionRequests = [];
+  globalThis.fetch = async (_url, options) => {
+    correctionRequests.push(JSON.parse(options.body));
+    return Response.json({ choices: [{ message: {
+      content: JSON.stringify(correctionRequests.length === 1 ? invalid : keharwa),
+    } }] });
+  };
+  const repaired = await requestComposition({ ...args, searchWeb: true });
+  assert.deepEqual(repaired, keharwa);
+  assert.equal(compositionUnits(proposalComposition(repaired.composition).steps), 64);
+  assert.equal(correctionRequests.length, 2);
+  assert.match(correctionRequests[1].messages.at(-1).content, /Unknown bols: UnsupportedBol/);
+  assert.equal(correctionRequests[1].tools, undefined, 'Correction does not repeat web search');
+  assert.equal(args.messages.length, 1, 'Correction does not mutate chat history');
+  let failedAttempts = 0;
+  globalThis.fetch = async () => {
+    failedAttempts++;
+    return Response.json({ choices: [{ message: { content: JSON.stringify(invalid) } }] });
+  };
+  await assert.rejects(requestComposition(args), /after a correction attempt/);
+  assert.equal(failedAttempts, 2, 'Invalid proposals retry only once');
   for (const status of [401, 402, 403, 404, 429, 500]) {
     globalThis.fetch = async () =>
       new Response('do-not-display-provider-secret', { status });

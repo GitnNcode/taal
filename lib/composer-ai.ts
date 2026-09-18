@@ -168,81 +168,95 @@ export async function requestComposition({
   signal: AbortSignal;
   searchWeb?: boolean;
 }): Promise<ComposerReply> {
-  const response = await fetch(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      method: 'POST',
-      signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'X-OpenRouter-Title': 'Taal',
+  const requestMessages: ChatMessage[] = [...messages];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    signal.throwIfAborted();
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'X-OpenRouter-Title': 'Taal',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'system', content: system }, ...requestMessages],
+          response_format: { type: 'json_object' },
+          ...(searchWeb && attempt === 0
+            ? { tools: [{ type: 'openrouter:web_search', parameters: {
+                engine: 'exa', max_results: 3, max_total_results: 3, max_uses: 1,
+              } }] }
+            : {}),
+          max_tokens: 8192,
+        }),
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'system', content: system }, ...messages],
-        response_format: { type: 'json_object' },
-        ...(searchWeb
-          ? { tools: [{ type: 'openrouter:web_search', parameters: {
-              engine: 'exa', max_results: 3, max_total_results: 3, max_uses: 1,
-            } }] }
-          : {}),
-        max_tokens: 8192,
-      }),
-    },
-  );
-  if (!response.ok) throw new ComposerError(openRouterError(response.status));
-  const data = (await response.json()) as {
-    error?: { code?: number };
-    choices?: {
-      finish_reason?: string;
-      message?: {
-        content?: unknown;
-        annotations?: {
-          type?: string;
-          url_citation?: { url?: unknown; title?: unknown };
-        }[];
-      };
-    }[];
-  };
-  if (data.error)
-    throw new ComposerError(
-      openRouterError(Number(data.error.code) || 502),
     );
-  const choice = data.choices?.[0];
-  if (choice?.finish_reason === 'length')
-    throw new ComposerError('The response was cut short. Ask for fewer cycles.');
-  if (typeof choice?.message?.content !== 'string')
-    throw new ComposerError('The model returned no composition. Try again.');
-  let reply: ComposerReply;
-  try {
-    reply = parseComposerReply(choice.message.content);
-  } catch {
-    throw new ComposerError('The model returned an invalid proposal. Ask it to use the supported bols and valid cycle lengths, or try another model.');
+    if (!response.ok) throw new ComposerError(openRouterError(response.status));
+    const data = (await response.json()) as {
+      error?: { code?: number };
+      choices?: {
+        finish_reason?: string;
+        message?: {
+          content?: unknown;
+          annotations?: {
+            type?: string;
+            url_citation?: { url?: unknown; title?: unknown };
+          }[];
+        };
+      }[];
+    };
+    if (data.error)
+      throw new ComposerError(
+        openRouterError(Number(data.error.code) || 502),
+      );
+    const choice = data.choices?.[0];
+    if (choice?.finish_reason === 'length')
+      throw new ComposerError('The response was cut short. Ask for fewer cycles.');
+    if (typeof choice?.message?.content !== 'string')
+      throw new ComposerError('The model returned no composition. Try again.');
+    let reply: ComposerReply;
+    try {
+      reply = parseComposerReply(choice.message.content);
+    } catch (error) {
+      if (attempt === 1 || choice.message.content.length > 200_000)
+        throw new ComposerError('The model could not produce a valid composition after a correction attempt. Try a shorter request or another model.');
+      requestMessages.push(
+        { role: 'assistant', content: choice.message.content },
+        {
+          role: 'user',
+          content: `The app rejected this proposal: ${error instanceof Error ? error.message : 'Invalid response format'}. Correct it to satisfy the original request and the system rules. Return only the complete JSON object with explanation and composition. Use only supported bols, comma-separated script tokens, numeric settings, and valid cycle lengths.`,
+        },
+      );
+      continue;
+    }
+    const sources = choice.message.annotations
+      ?.filter(
+        (annotation) =>
+          annotation.type === 'url_citation' &&
+          typeof annotation.url_citation?.url === 'string' &&
+          typeof annotation.url_citation?.title === 'string',
+      )
+      .map((annotation) => ({
+        title: annotation.url_citation!.title as string,
+        url: annotation.url_citation!.url as string,
+      }))
+      .filter(
+        (source) => {
+          try { return ['http:', 'https:'].includes(new URL(source.url).protocol); }
+          catch { return false; }
+        },
+      )
+      .filter(
+        (source, index, all) =>
+          all.findIndex((candidate) => candidate.url === source.url) === index,
+      )
+      .slice(0, 10);
+    return sources?.length
+      ? parseComposerReply(JSON.stringify({ ...reply, sources }))
+      : reply;
   }
-  const sources = choice.message.annotations
-    ?.filter(
-      (annotation) =>
-        annotation.type === 'url_citation' &&
-        typeof annotation.url_citation?.url === 'string' &&
-        typeof annotation.url_citation?.title === 'string',
-    )
-    .map((annotation) => ({
-      title: annotation.url_citation!.title as string,
-      url: annotation.url_citation!.url as string,
-    }))
-    .filter(
-      (source) => {
-        try { return ['http:', 'https:'].includes(new URL(source.url).protocol); }
-        catch { return false; }
-      },
-    )
-    .filter(
-      (source, index, all) =>
-        all.findIndex((candidate) => candidate.url === source.url) === index,
-    )
-    .slice(0, 10);
-  return sources?.length
-    ? parseComposerReply(JSON.stringify({ ...reply, sources }))
-    : reply;
+  throw new ComposerError('The model could not produce a valid composition. Try again.');
 }
