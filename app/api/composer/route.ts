@@ -11,6 +11,21 @@ import { MAX_BPM, MIN_BPM, parseComposition } from '@/lib/tabla';
 function sameOrigin(request: Request) {
   return request.headers.get('origin') === new URL(request.url).origin;
 }
+// ponytail: in-memory per-IP window, resets on cold start; move to KV if abuse persists.
+const LIMIT = 20;
+const WINDOW_MS = 60 * 60 * 1000;
+const hits = new Map<string, number[]>();
+function rateLimited(request: Request) {
+  const ip =
+    request.headers.get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const now = Date.now();
+  const recent = (hits.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
+  if (recent.length >= LIMIT) return true;
+  recent.push(now);
+  hits.set(ip, recent);
+  if (hits.size > 10000) hits.clear();
+  return false;
+}
 function key() {
   const value = process.env.OPENROUTER_API_KEY;
   return typeof value === 'string' ? value.trim() : '';
@@ -37,6 +52,11 @@ export async function POST(request: Request) {
     return json(
       { error: 'The AI assistant is not configured.' },
       503,
+    );
+  if (rateLimited(request))
+    return json(
+      { error: 'You have used the hosted AI a lot this hour. Try again later.' },
+      429,
     );
   let input;
   try {
